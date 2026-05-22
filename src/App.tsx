@@ -8,10 +8,11 @@ import { Step3Filter } from './pages/Step3Filter'
 import { Step4Play } from './pages/Step4Play'
 import { Step5Advanced } from './pages/Step5Advanced'
 import { Step6Effects } from './pages/Step6Effects'
+import { Step7Sequencer } from './pages/Step7Sequencer'
 import type { StepId } from './types'
 
 const MIN_STEP = 1
-const MAX_STEP = 6
+const MAX_STEP = 7
 
 export function App() {
   const step = useSynthStore((s) => s.step)
@@ -91,6 +92,7 @@ export function App() {
         {step === 4 && <Step4Play />}
         {step === 5 && <Step5Advanced />}
         {step === 6 && <Step6Effects />}
+        {step === 7 && <Step7Sequencer />}
       </main>
       <footer className="mt-8 border-t border-lab-line bg-white py-4 text-center text-xs text-lab-mute">
         wavetable synthesis · AudioWorklet · React + TypeScript

@@ -6,9 +6,17 @@ import { useSynthStore } from '../store/synthStore'
 type Props = {
   startMidi?: number    // 一番左の白鍵 (デフォルト C3=48)
   octaves?: number      // オクターブ数
+  /**
+   * 指定するとデフォルトの AudioEngine 直叩きを抑制し、押下中のルート MIDI を通知する。
+   * - 押下: 新しい MIDI（最後に押された鍵）
+   * - レガート中の離鍵: 残っている最新の MIDI
+   * - 全離鍵: null
+   * Step7 ステップシーケンサーで Sequencer.setRoot にバインドして使用。
+   */
+  onRootChange?: (midi: number | null) => void
 }
 
-export function Keyboard({ startMidi = 48, octaves = 3 }: Props) {
+export function Keyboard({ startMidi = 48, octaves = 3, onRootChange }: Props) {
   const [activeMidi, setActiveMidi] = useState<number | null>(null)
   const setCurrentFreq = useSynthStore((s) => s.setCurrentFreq)
   const pcBaseMidi = 60 // PCキーボードの "a" を C4 に割当
@@ -32,7 +40,11 @@ export function Keyboard({ startMidi = 48, octaves = 3 }: Props) {
     heldRef.current.push(midi)
 
     const freq = midiToFreq(midi)
-    AudioEngine.noteOn(freq)
+    if (onRootChange) {
+      onRootChange(midi)
+    } else {
+      AudioEngine.noteOn(freq)
+    }
     setActiveMidi(midi)
     setCurrentFreq(freq)
   }
@@ -42,7 +54,11 @@ export function Keyboard({ startMidi = 48, octaves = 3 }: Props) {
     if (idx >= 0) heldRef.current.splice(idx, 1)
 
     if (heldRef.current.length === 0) {
-      AudioEngine.noteOff()
+      if (onRootChange) {
+        onRootChange(null)
+      } else {
+        AudioEngine.noteOff()
+      }
       setActiveMidi(null)
       setCurrentFreq(null)
       return
@@ -50,14 +66,22 @@ export function Keyboard({ startMidi = 48, octaves = 3 }: Props) {
     // 残っている最新の鍵に音程だけ切り替え（エンベロープは再アタックしない＝レガート）
     const nextMidi = heldRef.current[heldRef.current.length - 1]
     const nextFreq = midiToFreq(nextMidi)
-    AudioEngine.setFrequency(nextFreq)
+    if (onRootChange) {
+      onRootChange(nextMidi)
+    } else {
+      AudioEngine.setFrequency(nextFreq)
+    }
     setActiveMidi(nextMidi)
     setCurrentFreq(nextFreq)
   }
 
   const releaseAll = () => {
     heldRef.current = []
-    AudioEngine.noteOff()
+    if (onRootChange) {
+      onRootChange(null)
+    } else {
+      AudioEngine.noteOff()
+    }
     setActiveMidi(null)
     setCurrentFreq(null)
   }

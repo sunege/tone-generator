@@ -1,8 +1,9 @@
 import { create } from 'zustand'
-import type { Envelope, FilterEnvelope, FilterType, FxChainState, FxId, LfoParams, SynthPatch, StepId } from '../types'
+import type { Envelope, FilterEnvelope, FilterType, FxChainState, FxId, LfoParams, SeqStep, SequencerState, SynthPatch, StepId } from '../types'
 import { getPreset } from '../lib/wavetablePresets'
 import { ENV_PRESETS } from '../lib/envelopePresets'
 import { AudioEngine } from '../audio/AudioEngine'
+import { DEFAULT_SEQUENCER_STATE, Sequencer } from '../audio/sequencer'
 
 // 波形エディタの UI 状態。ステップ切替で WaveformEditor が unmount されても保持したいため store に置く。
 type WaveEditorMode = 'draw' | 'formula'
@@ -30,6 +31,8 @@ type SynthStore = {
   setFxEnabled: (id: FxId, enabled: boolean) => void
   setFxParam: (id: FxId, name: string, value: number) => void
   moveFx: (id: FxId, direction: 'up' | 'down') => void
+  setSequencerConfig: (p: Partial<Omit<SequencerState, 'steps'>>) => void
+  setSeqStep: (index: number, partial: Partial<SeqStep>) => void
   setCurrentFreq: (hz: number | null) => void
   setActivePresetKey: (key: string | undefined) => void
   setActiveEnvelopePresetKey: (key: string | undefined) => void
@@ -57,6 +60,7 @@ const initialPatch: SynthPatch = {
   filterEnvelope: { enabled: false, attack: 0.01, decay: 0.4, sustain: 0.0, release: 0.3, depth: 3000 },
   lfo: { enabled: false, waveform: 'sine', rate: 5, depth: 0.3, target: 'amp' },
   fx: initialFx,
+  sequencer: DEFAULT_SEQUENCER_STATE,
 }
 
 export const useSynthStore = create<SynthStore>((set, get) => ({
@@ -151,6 +155,21 @@ export const useSynthStore = create<SynthStore>((set, get) => ({
     const fx: FxChainState = { ...prevFx, order }
     set({ patch: { ...get().patch, fx } })
     AudioEngine.setFxOrder(order)
+  },
+
+  setSequencerConfig: (p) => {
+    const sequencer: SequencerState = { ...get().patch.sequencer, ...p }
+    set({ patch: { ...get().patch, sequencer } })
+    Sequencer.setConfig(sequencer)
+  },
+
+  setSeqStep: (index, partial) => {
+    const prev = get().patch.sequencer
+    if (index < 0 || index >= prev.steps.length) return
+    const steps = prev.steps.map((s, i) => (i === index ? { ...s, ...partial } : s))
+    const sequencer: SequencerState = { ...prev, steps }
+    set({ patch: { ...get().patch, sequencer } })
+    Sequencer.setConfig(sequencer)
   },
 
   setCurrentFreq: (hz) => set({ currentFreq: hz }),

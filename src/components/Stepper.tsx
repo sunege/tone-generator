@@ -12,6 +12,7 @@ const STEPS: { id: StepId; label: string }[] = [
   { id: 4, label: '演奏' },
   { id: 5, label: 'アドバンスド' },
   { id: 6, label: 'エフェクター' },
+  { id: 7, label: 'シーケンサー' },
 ]
 
 export function Stepper({ current, onChange }: Props) {

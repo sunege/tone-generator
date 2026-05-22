@@ -50,6 +50,22 @@ export type FxChainState = {
   fx: Record<FxId, FxState>
 }
 
+// ステップシーケンサー（Step7）
+export const SEQUENCER_MAX_STEPS = 32
+
+export type SeqStep = {
+  enabled: boolean
+  semitones: number  // root からの半音オフセット（±）
+}
+
+export type SequencerState = {
+  bpm: number            // 60..240
+  division: number       // 1=全, 2=半, 4=4分, 8=8分, 16=16分, 32=32分
+  length: number         // 再生するステップ数 1..32
+  gate: number           // 0..1 ステップ長に対するゲート時間比
+  steps: SeqStep[]       // 長さ SEQUENCER_MAX_STEPS で固定
+}
+
 export type SynthPatch = {
   wavetable: Float32Array
   envelope: Envelope
@@ -57,6 +73,7 @@ export type SynthPatch = {
   filterEnvelope: FilterEnvelope
   lfo: LfoParams
   fx: FxChainState
+  sequencer: SequencerState
 }
 
-export type StepId = 1 | 2 | 3 | 4 | 5 | 6
+export type StepId = 1 | 2 | 3 | 4 | 5 | 6 | 7
