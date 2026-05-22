@@ -14,7 +14,9 @@ export function Step2Envelope() {
   const patch = useSynthStore((s) => s.patch)
   const setEnvelope = useSynthStore((s) => s.setEnvelope)
   const setCurrentFreq = useSynthStore((s) => s.setCurrentFreq)
-  const [activePreset, setActivePreset] = useState<string | undefined>('piano')
+  // エンベロープ プリセット選択マーカーは store 経由で永続化（ステップ切替で消えないように）
+  const activePreset = useSynthStore((s) => s.activeEnvelopePresetKey)
+  const setActivePreset = useSynthStore((s) => s.setActiveEnvelopePresetKey)
   const [holding, setHolding] = useState(false)
   // フィルター適用の ON/OFF。デフォルトは適用なし（フィルターはバイパスして純粋に ADSR の効果だけを聞く）
   const [applyFilter, setApplyFilter] = useState(false)

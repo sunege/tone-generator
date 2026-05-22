@@ -1,18 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { WAVETABLE_SIZE } from '../types'
 import { parseFormulaToWavetable } from '../lib/formulaParser'
-
-type Mode = 'draw' | 'formula'
+import { useSynthStore } from '../store/synthStore'
 
 type Props = {
   wavetable: Float32Array
   onChange: (w: Float32Array) => void
   height?: number
+  /** 参考用に薄く重ね描きする波形（マイクキャプチャのなぞりガイドなど） */
+  overlayWavetable?: Float32Array | null
 }
 
-export function WaveformEditor({ wavetable, onChange, height = 240 }: Props) {
-  const [mode, setMode] = useState<Mode>('draw')
-  const [formula, setFormula] = useState('sin(x)')
+export function WaveformEditor({ wavetable, onChange, height = 240, overlayWavetable }: Props) {
+  // モード・数式入力は store 経由で永続化（ステップ切替で unmount されても消えないように）
+  const mode = useSynthStore((s) => s.waveEditorMode)
+  const setMode = useSynthStore((s) => s.setWaveEditorMode)
+  const formula = useSynthStore((s) => s.waveEditorFormula)
+  const setFormula = useSynthStore((s) => s.setWaveEditorFormula)
   const [formulaError, setFormulaError] = useState<string | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const drawingRef = useRef(false)
@@ -52,6 +56,25 @@ export function WaveformEditor({ wavetable, onChange, height = 240 }: Props) {
     ctx.strokeStyle = '#f1f5f9'
     ctx.stroke()
 
+    // overlay (なぞりガイド) - メインより先に描いて下層に置く
+    if (overlayWavetable && overlayWavetable.length > 0) {
+      const ON = overlayWavetable.length
+      ctx.strokeStyle = '#f97316'
+      ctx.globalAlpha = 0.35
+      ctx.lineWidth = 2
+      ctx.setLineDash([6, 4])
+      ctx.beginPath()
+      for (let i = 0; i < ON; i++) {
+        const x = (i / (ON - 1)) * w
+        const y = h / 2 - overlayWavetable[i] * (h / 2) * 0.95
+        if (i === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      }
+      ctx.stroke()
+      ctx.setLineDash([])
+      ctx.globalAlpha = 1
+    }
+
     // waveform
     const N = wavetable.length
     ctx.strokeStyle = '#0ea5e9'
@@ -64,7 +87,7 @@ export function WaveformEditor({ wavetable, onChange, height = 240 }: Props) {
       else ctx.lineTo(x, y)
     }
     ctx.stroke()
-  }, [wavetable, height])
+  }, [wavetable, height, overlayWavetable])
 
   // wavetable プロップが変わったら作業用バッファを同期
   useEffect(() => {

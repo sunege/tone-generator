@@ -5,6 +5,7 @@ import { Oscilloscope } from '../components/Oscilloscope'
 import { FFTDisplay } from '../components/FFTDisplay'
 import { PresetSelector } from '../components/PresetSelector'
 import { HintList } from '../components/Hint'
+import { MicCapture } from '../components/MicCapture'
 import { PRESETS } from '../lib/wavetablePresets'
 import { AudioEngine } from '../audio/AudioEngine'
 
@@ -14,10 +15,26 @@ export function Step1Waveform() {
   const patch = useSynthStore((s) => s.patch)
   const setWavetable = useSynthStore((s) => s.setWavetable)
   const setCurrentFreq = useSynthStore((s) => s.setCurrentFreq)
-  const [activePreset, setActivePreset] = useState<string | undefined>('sine')
+  // プリセット選択マーカーは store 経由で永続化（ステップ切替で消えないように）
+  const activePreset = useSynthStore((s) => s.activePresetKey)
+  const setActivePreset = useSynthStore((s) => s.setActivePresetKey)
   const [playing, setPlaying] = useState(false)
   // ADSR/フィルター適用の ON/OFF。デフォルトは適用なし（素の波形）
   const [applyEffects, setApplyEffects] = useState(false)
+  // マイクキャプチャから取得した1周期波形（オーバーレイ表示用）
+  const [overlayWavetable, setOverlayWavetable] = useState<Float32Array | null>(null)
+
+  const handleMicTransfer = useCallback(
+    (wt: Float32Array) => {
+      setActivePreset(undefined)
+      setWavetable(wt)
+    },
+    [setWavetable],
+  )
+
+  const handleOverlay = useCallback((wt: Float32Array | null) => {
+    setOverlayWavetable(wt)
+  }, [])
 
   // Oscilloscope に渡すゲッターは再レンダで参照が変わらないよう useCallback で固定
   const getFrequency = useCallback(() => useSynthStore.getState().currentFreq, [])
@@ -129,7 +146,11 @@ export function Step1Waveform() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="space-y-3">
-          <WaveformEditor wavetable={patch.wavetable} onChange={handleEdit} />
+          <WaveformEditor
+            wavetable={patch.wavetable}
+            onChange={handleEdit}
+            overlayWavetable={overlayWavetable}
+          />
           <PresetSelector
             title="波形プリセット"
             items={PRESETS.map((p) => ({ key: p.key, label: p.label, description: p.description }))}
@@ -146,6 +167,12 @@ export function Step1Waveform() {
           <FFTDisplay getAnalyser={AudioEngine.getAnalyserPost} title="FFTスペクトル（リアルタイム）" />
         </div>
       </div>
+
+      <MicCapture
+        onTransfer={handleMicTransfer}
+        onOverlay={handleOverlay}
+        overlayActive={overlayWavetable !== null}
+      />
     </div>
   )
 }
