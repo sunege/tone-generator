@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { useSynthStore } from './store/synthStore'
 import { AudioEngine } from './audio/AudioEngine'
 import { Stepper } from './components/Stepper'
@@ -5,6 +6,12 @@ import { Step1Waveform } from './pages/Step1Waveform'
 import { Step2Envelope } from './pages/Step2Envelope'
 import { Step3Filter } from './pages/Step3Filter'
 import { Step4Play } from './pages/Step4Play'
+import { Step5Advanced } from './pages/Step5Advanced'
+import { Step6Effects } from './pages/Step6Effects'
+import type { StepId } from './types'
+
+const MIN_STEP = 1
+const MAX_STEP = 6
 
 export function App() {
   const step = useSynthStore((s) => s.step)
@@ -22,6 +29,25 @@ export function App() {
       alert('音声の初期化に失敗しました。コンソールを確認してください。')
     }
   }
+
+  // ArrowLeft / ArrowRight でステップ切替。入力フォーカス中は無効化（スライダーの値変更などを邪魔しない）
+  useEffect(() => {
+    if (!audioReady) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+      const target = e.target as HTMLElement | null
+      if (target) {
+        const tag = target.tagName.toLowerCase()
+        if (tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable) return
+      }
+      e.preventDefault()
+      const delta = e.key === 'ArrowRight' ? 1 : -1
+      const next = Math.max(MIN_STEP, Math.min(MAX_STEP, step + delta)) as StepId
+      if (next !== step) setStep(next)
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [audioReady, step, setStep])
 
   if (!audioReady) {
     return (
@@ -51,7 +77,9 @@ export function App() {
         <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-3 md:flex-row md:items-center md:justify-between">
           <div>
             <h1 className="text-lg font-bold">🎛️ 音色学習シミュレータ</h1>
-            <p className="text-xs text-lab-mute">高校物理 / 音のしくみを体験</p>
+            <p className="text-xs text-lab-mute">
+              高校物理 / 音のしくみを体験 ・ <kbd className="rounded bg-slate-100 px-1 font-mono">←</kbd>/<kbd className="rounded bg-slate-100 px-1 font-mono">→</kbd> でステップ切替
+            </p>
           </div>
           <Stepper current={step} onChange={setStep} />
         </div>
@@ -61,6 +89,8 @@ export function App() {
         {step === 2 && <Step2Envelope />}
         {step === 3 && <Step3Filter />}
         {step === 4 && <Step4Play />}
+        {step === 5 && <Step5Advanced />}
+        {step === 6 && <Step6Effects />}
       </main>
       <footer className="mt-8 border-t border-lab-line bg-white py-4 text-center text-xs text-lab-mute">
         wavetable synthesis · AudioWorklet · React + TypeScript

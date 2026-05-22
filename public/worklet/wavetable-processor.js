@@ -3,9 +3,23 @@
  * 1周期分の wavetable を線形補間で繰り返し再生する。
  * メッセージプロトコル:
  *   { type: 'wavetable', data: Float32Array }   // 波形差し替え
- *   { type: 'frequency', value: number }        // ピッチ (Hz)
+ *   { type: 'frequency', value: number }        // ベースピッチ (Hz)
+ * AudioParam:
+ *   detune: cents (a-rate)  // LFO による vibrato/pitch mod 用
  */
 class WavetableProcessor extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return [
+      {
+        name: 'detune',
+        defaultValue: 0,
+        minValue: -2400,
+        maxValue: 2400,
+        automationRate: 'a-rate',
+      },
+    ]
+  }
+
   constructor() {
     super()
     this.table = new Float32Array(1024)
@@ -27,20 +41,25 @@ class WavetableProcessor extends AudioWorkletProcessor {
     }
   }
 
-  process(_inputs, outputs) {
+  process(_inputs, outputs, parameters) {
     const output = outputs[0]
     const channel = output[0]
     const sr = sampleRate
     const N = this.tableSize
-    const inc = (this.frequency * N) / sr
+    const detuneArr = parameters.detune
+    const constDetune = detuneArr.length === 1
 
     for (let i = 0; i < channel.length; i++) {
+      const detune = constDetune ? detuneArr[0] : detuneArr[i]
+      // detune が 0 のとき pow を回避（多くのケースで)
+      const freq = detune === 0 ? this.frequency : this.frequency * Math.pow(2, detune / 1200)
+      const inc = (freq * N) / sr
+
       const idx = this.phase
       const i0 = Math.floor(idx)
       const i1 = (i0 + 1) % N
       const frac = idx - i0
       const sample = this.table[i0] * (1 - frac) + this.table[i1] * frac
-      // 全チャンネルに同じ値
       for (let c = 0; c < output.length; c++) {
         output[c][i] = sample
       }

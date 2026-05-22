@@ -8,7 +8,10 @@ type Props = {
   color?: string
 }
 
-const SILENCE_THRESHOLD = 0.005
+// 描画継続のしきい値。0.0005 ≈ -66dB FS。
+// 人間の聴覚しきい値より少し下までは描き続け、Release ランプや Delay/Reverb の反響が
+// 「音として聞こえている間は必ず見える」状態にする。
+const SILENCE_THRESHOLD = 0.0005
 // 横軸は A3 (220Hz) の 1 周期で固定。約 4.55ms。
 // これで高い音ほど多くの波長が画面に収まり、波長の短さが視覚的にわかる。
 const REFERENCE_FREQ = 220
@@ -32,6 +35,9 @@ export function Oscilloscope({
   const rafRef = useRef<number | null>(null)
   const bufRef = useRef<Float32Array<ArrayBuffer> | null>(null)
   const labelRef = useRef<HTMLSpanElement>(null)
+  // 最後に観測した有効な再生周波数。鍵盤を離したあとや FX 反響中に
+  // ページ側が currentFreq=null を渡してきても、トリガ同期のため記憶しておく。
+  const lastFreqRef = useRef<number | null>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -49,7 +55,11 @@ export function Oscilloscope({
 
     const draw = () => {
       const analyser = getAnalyser()
-      const freq = getFrequency()
+      const currentFreq = getFrequency()
+      // 現在 freq が有効なら記憶。null/0 のときは前回値で代用する。
+      if (currentFreq != null && currentFreq > 0) {
+        lastFreqRef.current = currentFreq
+      }
       const rect = canvas.getBoundingClientRect()
       const w = Math.max(1, Math.floor(rect.width))
       const h = height
@@ -77,24 +87,28 @@ export function Oscilloscope({
       const buf = bufRef.current
       analyser.getFloatTimeDomainData(buf)
 
-      // 振幅が極小なら静音とみなしフラット表示
+      // 振幅ピーク。これが SILENCE_THRESHOLD を下回るまでは描画継続する。
       let peak = 0
       for (let i = 0; i < N; i++) {
         const v = Math.abs(buf[i])
         if (v > peak) peak = v
       }
-      if (peak < SILENCE_THRESHOLD || freq == null || freq <= 0) {
+      if (peak < SILENCE_THRESHOLD) {
         if (labelRef.current) labelRef.current.textContent = label
         rafRef.current = requestAnimationFrame(draw)
         return
       }
 
+      // トリガ同期に使う周波数: 現在値 → 直前の有効値 → A3 フォールバック
+      const triggerFreq = (currentFreq && currentFreq > 0)
+        ? currentFreq
+        : (lastFreqRef.current ?? REFERENCE_FREQ)
+
       const sr = analyser.context.sampleRate
       const windowSpp = sr / REFERENCE_FREQ // 固定窓 (A3 1周期分)
-      const currentSpp = sr / freq           // 現在音の1周期 (波長カウント用)
+      const currentSpp = sr / triggerFreq    // 現在音の1周期 (波長カウント用)
 
       // トリガー: 負→正のゼロクロス。線形補間で sub-sample 精度を確保
-      // 探索範囲: 後ろに 1 窓分残してバッファ前半を見る
       const searchEnd = Math.max(1, Math.floor(N - windowSpp - 1))
       let trigger = -1
       for (let i = 1; i < searchEnd; i++) {
@@ -106,7 +120,7 @@ export function Oscilloscope({
       }
       if (trigger < 0) trigger = 0
 
-      // 描画: w ピクセルに対して windowSpp サンプルを線形補間でマップ
+      // 描画
       ctx.strokeStyle = color
       ctx.lineWidth = 2
       ctx.beginPath()
@@ -116,7 +130,6 @@ export function Oscilloscope({
         const i1 = Math.min(N - 1, i0 + 1)
         const frac = t - i0
         const s = buf[i0] * (1 - frac) + buf[i1] * frac
-        // 表示は ±1 までを 95% に収めて余白
         const y = h / 2 - Math.max(-1, Math.min(1, s)) * (h / 2) * 0.95
         if (x === 0) ctx.moveTo(x, y)
         else ctx.lineTo(x, y)
@@ -124,7 +137,12 @@ export function Oscilloscope({
       ctx.stroke()
 
       const wavelengths = windowSpp / currentSpp
-      label = `${freq.toFixed(1)} Hz · 約 ${wavelengths.toFixed(2)} 波長`
+      if (currentFreq && currentFreq > 0) {
+        label = `${currentFreq.toFixed(1)} Hz · 約 ${wavelengths.toFixed(2)} 波長`
+      } else {
+        // Release/Delay 反響中: 鍵盤は離されているが音は鳴っている
+        label = `余韻中 · ${triggerFreq.toFixed(1)} Hz 基準`
+      }
       if (labelRef.current) labelRef.current.textContent = label
 
       rafRef.current = requestAnimationFrame(draw)
