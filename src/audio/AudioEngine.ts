@@ -6,6 +6,8 @@ import { createAllEffects, FxChain, type FxNode } from './fx'
 const WORKLET_URL = '/worklet/wavetable-processor.js'
 const BITCRUSHER_WORKLET_URL = '/worklet/bitcrusher-processor.js'
 
+type LfoSlot = 1 | 2
+
 type EngineState = {
   ctx: AudioContext
   worklet: AudioWorkletNode
@@ -15,8 +17,12 @@ type EngineState = {
   analyserPre: AnalyserNode
   analyserPost: AnalyserNode
   masterGain: GainNode
+  // LFO スロット 2 つ。両者とも常設で、行き先（target）に応じて
+  // connect/disconnect で動的に挿げ替える。同じ target を選んでも自然に加算される。
   lfoOsc: OscillatorNode
   lfoDepth: GainNode
+  lfoOsc2: OscillatorNode
+  lfoDepth2: GainNode
   // フィルター ADSR の出力（filterEnvSource → filterEnvDepth → filter.frequency の additive 経路）
   filterEnvSource: ConstantSourceNode
   filterEnvDepth: GainNode
@@ -36,8 +42,8 @@ let envelopeBypass = false
 let filterBypass = false
 let lfoBypass = false
 let fxChainBypass = true   // デフォルトで FX バイパス（Steps 1-5 は素の音）
-// 現在 LFO がどこに接続されているか（disconnect 用）
-let lfoConnectedTo: LfoTarget | null = null
+// スロットごとに「現在どこに接続されているか」を覚えておく（正しく disconnect するため）
+const lfoConnectedTo: (LfoTarget | null)[] = [null, null]
 
 const SILENT = 0.0001
 const RAW_GAIN = 0.5
@@ -57,53 +63,65 @@ function depthToGain(target: LfoTarget, depth: number): number {
   }
 }
 
-function disconnectLfo() {
-  if (!state || lfoConnectedTo === null) return
+function getSlotNodes(slot: LfoSlot): { osc: OscillatorNode; depth: GainNode } | null {
+  if (!state) return null
+  return slot === 1
+    ? { osc: state.lfoOsc, depth: state.lfoDepth }
+    : { osc: state.lfoOsc2, depth: state.lfoDepth2 }
+}
+
+function disconnectLfo(slot: LfoSlot) {
+  if (!state) return
+  const connected = lfoConnectedTo[slot - 1]
+  if (connected === null) return
+  const nodes = getSlotNodes(slot)
+  if (!nodes) return
   try {
-    if (lfoConnectedTo === 'amp') {
-      state.lfoDepth.disconnect(state.lfoAmpGain.gain)
-    } else if (lfoConnectedTo === 'filter') {
-      state.lfoDepth.disconnect(state.filter.frequency)
-    } else if (lfoConnectedTo === 'pitch' && state.detuneParam) {
-      state.lfoDepth.disconnect(state.detuneParam)
-    }
+    if (connected === 'amp') nodes.depth.disconnect(state.lfoAmpGain.gain)
+    else if (connected === 'filter') nodes.depth.disconnect(state.filter.frequency)
+    else if (connected === 'pitch' && state.detuneParam) nodes.depth.disconnect(state.detuneParam)
   } catch {
     /* ignore — disconnect は対象が一致しないと例外を投げるが、状態は同期している前提 */
   }
-  lfoConnectedTo = null
+  lfoConnectedTo[slot - 1] = null
 }
 
-function connectLfoTo(target: LfoTarget) {
+function connectLfoTo(slot: LfoSlot, target: LfoTarget) {
   if (!state) return
-  if (target === 'amp') {
-    state.lfoDepth.connect(state.lfoAmpGain.gain)
-  } else if (target === 'filter') {
-    state.lfoDepth.connect(state.filter.frequency)
-  } else if (target === 'pitch' && state.detuneParam) {
-    state.lfoDepth.connect(state.detuneParam)
-  }
-  lfoConnectedTo = target
+  const nodes = getSlotNodes(slot)
+  if (!nodes) return
+  if (target === 'amp') nodes.depth.connect(state.lfoAmpGain.gain)
+  else if (target === 'filter') nodes.depth.connect(state.filter.frequency)
+  else if (target === 'pitch' && state.detuneParam) nodes.depth.connect(state.detuneParam)
+  lfoConnectedTo[slot - 1] = target
 }
 
-// patch.lfo の現在値と lfoBypass フラグから接続/切断と各 param を更新する
-function applyLfo() {
+// patch.lfo / patch.lfo2 の現在値と lfoBypass フラグから接続/切断と各 param を更新する
+function applyLfoSlot(slot: LfoSlot) {
   if (!state || !currentPatch) return
   const t = state.ctx.currentTime
-  const lfo = currentPatch.lfo
+  const lfo = slot === 1 ? currentPatch.lfo : currentPatch.lfo2
+  const nodes = getSlotNodes(slot)
+  if (!nodes) return
 
-  state.lfoOsc.type = lfo.waveform as OscillatorType
-  state.lfoOsc.frequency.setTargetAtTime(Math.max(0.01, lfo.rate), t, 0.01)
-  state.lfoDepth.gain.setTargetAtTime(depthToGain(lfo.target, lfo.depth), t, 0.01)
+  nodes.osc.type = lfo.waveform as OscillatorType
+  nodes.osc.frequency.setTargetAtTime(Math.max(0.01, lfo.rate), t, 0.01)
+  nodes.depth.gain.setTargetAtTime(depthToGain(lfo.target, lfo.depth), t, 0.01)
 
   const shouldConnect = lfo.enabled && !lfoBypass
   if (shouldConnect) {
-    if (lfoConnectedTo !== lfo.target) {
-      disconnectLfo()
-      connectLfoTo(lfo.target)
+    if (lfoConnectedTo[slot - 1] !== lfo.target) {
+      disconnectLfo(slot)
+      connectLfoTo(slot, lfo.target)
     }
   } else {
-    disconnectLfo()
+    disconnectLfo(slot)
   }
+}
+
+function applyAllLfos() {
+  applyLfoSlot(1)
+  applyLfoSlot(2)
 }
 
 async function ensureContext(): Promise<EngineState> {
@@ -141,7 +159,7 @@ async function ensureContext(): Promise<EngineState> {
   const masterGain = ctx.createGain()
   masterGain.gain.value = 0.5
 
-  // LFO (常設、target に応じて connect/disconnect で行き先を切替)
+  // LFO スロット 1 (常設、target に応じて connect/disconnect で行き先を切替)
   const lfoOsc = ctx.createOscillator()
   lfoOsc.type = 'sine'
   lfoOsc.frequency.value = 5
@@ -149,6 +167,15 @@ async function ensureContext(): Promise<EngineState> {
   lfoDepth.gain.value = 0
   lfoOsc.connect(lfoDepth)
   lfoOsc.start()
+
+  // LFO スロット 2
+  const lfoOsc2 = ctx.createOscillator()
+  lfoOsc2.type = 'triangle'
+  lfoOsc2.frequency.value = 3
+  const lfoDepth2 = ctx.createGain()
+  lfoDepth2.gain.value = 0
+  lfoOsc2.connect(lfoDepth2)
+  lfoOsc2.start()
 
   // フィルター ADSR: ConstantSource(1) → filterEnvDepth(gain=envValue) → filter.frequency
   // additive で base cutoff に envValue が加算される（LFO の filter mod とも併存可）
@@ -193,6 +220,7 @@ async function ensureContext(): Promise<EngineState> {
     ctx, worklet, envGain, lfoAmpGain, filter,
     analyserPre, analyserPost, masterGain,
     lfoOsc, lfoDepth,
+    lfoOsc2, lfoDepth2,
     filterEnvSource, filterEnvDepth,
     detuneParam,
     chainDry, chainWet, fxChain, fxNodes, analyserOut,
@@ -214,7 +242,7 @@ export const AudioEngine = {
     s.filter.type = initialPatch.filter.type
     s.filter.Q.value = initialPatch.filter.q
     s.filter.frequency.value = initialPatch.filter.cutoff
-    applyLfo()
+    applyAllLfos()
     // FX チェーン初期化（patch 値を全エフェクトに反映）
     s.fxChain.setOrder(initialPatch.fx.order)
     for (const id of Object.keys(initialPatch.fx.fx) as FxId[]) {
@@ -285,7 +313,13 @@ export const AudioEngine = {
   setLfo(partial: Partial<LfoParams>) {
     if (!currentPatch) return
     currentPatch.lfo = { ...currentPatch.lfo, ...partial }
-    applyLfo()
+    applyLfoSlot(1)
+  },
+
+  setLfo2(partial: Partial<LfoParams>) {
+    if (!currentPatch) return
+    currentPatch.lfo2 = { ...currentPatch.lfo2, ...partial }
+    applyLfoSlot(2)
   },
 
   setFilterEnvelope(partial: Partial<FilterEnvelope>) {
@@ -335,7 +369,45 @@ export const AudioEngine = {
 
   setLfoBypass(enabled: boolean) {
     lfoBypass = enabled
-    applyLfo()
+    applyAllLfos()
+  },
+
+  /**
+   * patch 全体を現在の audio graph に反映（バンク読込時に使用）。
+   * バイパス状態（envelope/filter/lfo/fxChain）は触らない — ページ側の責務。
+   * 演奏中ノートは中断せず、各 param は setTargetAtTime で滑らかに更新する。
+   */
+  applyPatch(patch: SynthPatch) {
+    currentPatch = patch
+    if (!state) return
+    const t = state.ctx.currentTime
+
+    // 1. wavetable（worklet が phase 連続なので継ぎ目なく差し替え可能）
+    AudioEngine.setWavetable(patch.wavetable)
+
+    // 2. filter（バイパス中は触らない — バイパス解除時に復元される）
+    if (!filterBypass) {
+      state.filter.type = patch.filter.type as BiquadFilterType
+      state.filter.Q.setTargetAtTime(Math.max(0.0001, Math.min(40, patch.filter.q)), t, 0.01)
+      state.filter.frequency.setTargetAtTime(Math.max(20, Math.min(20000, patch.filter.cutoff)), t, 0.01)
+    }
+
+    // 3. フィルター ADSR: 無効 or バイパス中なら現在の寄与を 0 に戻す（次の noteOn で再評価）
+    if (!patch.filterEnvelope.enabled || filterBypass) {
+      resetFilterEnvelope(state.filterEnvDepth.gain, t)
+    }
+
+    // 4. LFO×2（applyLfoSlot は currentPatch を読むので 1 行目で更新済み）
+    applyAllLfos()
+
+    // 5. FX チェーン（順序 → 各エフェクトの params → enabled の順で反映）
+    state.fxChain.setOrder(patch.fx.order)
+    for (const id of Object.keys(patch.fx.fx) as FxId[]) {
+      const fxState = patch.fx.fx[id]
+      const node = state.fxNodes[id]
+      for (const [k, v] of Object.entries(fxState.params)) node.setParam(k, v)
+      node.setEnabled(fxState.enabled)
+    }
   },
 
   setFrequency(freq: number) {

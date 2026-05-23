@@ -1,29 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useSynthStore } from '../store/synthStore'
 import { Keyboard } from '../components/Keyboard'
+import { LfoPanel } from '../components/LfoPanel'
 import { Oscilloscope } from '../components/Oscilloscope'
 import { FFTDisplay } from '../components/FFTDisplay'
 import { HintList } from '../components/Hint'
 import { AudioEngine } from '../audio/AudioEngine'
-import type { FilterType, LfoTarget, LfoWaveform } from '../types'
+import type { FilterType } from '../types'
 
 const FILTER_TYPES: { key: FilterType; label: string; description: string }[] = [
   { key: 'lowpass', label: 'ローパス', description: 'カットオフ以上を弱める（こもった音）' },
   { key: 'highpass', label: 'ハイパス', description: 'カットオフ以下を弱める（細い音）' },
   { key: 'bandpass', label: 'バンドパス', description: 'カットオフ周辺だけを通す（鼻音的）' },
-]
-
-const LFO_WAVEFORMS: { key: LfoWaveform; label: string }[] = [
-  { key: 'sine', label: '正弦' },
-  { key: 'triangle', label: '三角' },
-  { key: 'sawtooth', label: 'ノコギリ' },
-  { key: 'square', label: '矩形' },
-]
-
-const LFO_TARGETS: { key: LfoTarget; label: string; description: string }[] = [
-  { key: 'amp', label: '音量 (トレモロ)', description: '振幅を周期的に揺らす' },
-  { key: 'filter', label: 'フィルター (ワウ)', description: 'カットオフを周期的に揺らす' },
-  { key: 'pitch', label: 'ピッチ (ビブラート)', description: '音程を周期的に揺らす' },
 ]
 
 // 対数スライダー: 20Hz〜20kHz を 0..1 にマッピング
@@ -34,14 +22,6 @@ const logMax = Math.log10(F_MAX)
 const toFreqSlider = (hz: number) => (Math.log10(Math.max(F_MIN, Math.min(F_MAX, hz))) - logMin) / (logMax - logMin)
 const fromFreqSlider = (v: number) => Math.pow(10, logMin + v * (logMax - logMin))
 
-// LFO rate: 0.1〜20Hz の対数スライダー
-const R_MIN = 0.1
-const R_MAX = 20
-const rLogMin = Math.log10(R_MIN)
-const rLogMax = Math.log10(R_MAX)
-const toRateSlider = (hz: number) => (Math.log10(Math.max(R_MIN, Math.min(R_MAX, hz))) - rLogMin) / (rLogMax - rLogMin)
-const fromRateSlider = (v: number) => Math.pow(10, rLogMin + v * (rLogMax - rLogMin))
-
 // ピッチベンドの最大幅（cents）。±200 = ±2 semitone（MIDI 標準）
 const PITCH_BEND_RANGE = 200
 
@@ -49,11 +29,13 @@ export function Step5Advanced() {
   const filter = useSynthStore((s) => s.patch.filter)
   const filterEnv = useSynthStore((s) => s.patch.filterEnvelope)
   const lfo = useSynthStore((s) => s.patch.lfo)
+  const lfo2 = useSynthStore((s) => s.patch.lfo2)
   const setCutoff = useSynthStore((s) => s.setCutoff)
   const setFilterType = useSynthStore((s) => s.setFilterType)
   const setFilterQ = useSynthStore((s) => s.setFilterQ)
   const setFilterEnvelope = useSynthStore((s) => s.setFilterEnvelope)
   const setLfo = useSynthStore((s) => s.setLfo)
+  const setLfo2 = useSynthStore((s) => s.setLfo2)
   const setCurrentFreq = useSynthStore((s) => s.setCurrentFreq)
   // ピッチベンドは演奏ジェスチャーなので patch に持たず Step5 のローカル UI 状態
   const [pitchBend, setPitchBend] = useState(0)
@@ -95,6 +77,7 @@ export function Step5Advanced() {
           'レゾナンス（Q）を上げるとカットオフ付近が強調されて "クセ" のある音色になります',
           'バンドパスは特定の周波数帯だけを通すので、ワウペダルのような効果を作れます',
           'LFO を音量に当てるとトレモロ、フィルターに当てるとワウ、ピッチに当てるとビブラートになります',
+          'LFO は 2 系統用意してあるので、別々の行き先（例: LFO1=amp, LFO2=filter）に同時にかけて複雑な揺らぎを作れます',
           'フィルターエンベロープを正の depth にすると "シュワッ" と立ち上がる音、負にすると "わぁ〜ん" と閉じる音になります',
           'ピッチベンドはホイール風に音程をなめらかに上下できます。LFO ビブラートと併用可能です',
         ]}
@@ -278,109 +261,9 @@ export function Step5Advanced() {
           </div>
         </div>
 
-        {/* LFO 設定 */}
-        <div className="space-y-3 rounded-lg border border-lab-line bg-white p-4">
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold text-lab-ink">LFO（低周波揺らぎ）</div>
-            <label className="flex cursor-pointer items-center gap-2 text-xs">
-              <input
-                type="checkbox"
-                checked={lfo.enabled}
-                onChange={(e) => setLfo({ enabled: e.target.checked })}
-                className="accent-lab-accent"
-              />
-              <span className={lfo.enabled ? 'font-semibold text-lab-ink' : 'text-lab-mute'}>
-                {lfo.enabled ? 'ON' : 'OFF'}
-              </span>
-            </label>
-          </div>
-
-          <div className={`space-y-3 ${lfo.enabled ? '' : 'opacity-50'}`}>
-            <div className="space-y-1">
-              <div className="text-xs font-semibold text-lab-mute">行き先 (modulation target)</div>
-              <div className="flex flex-wrap gap-2">
-                {LFO_TARGETS.map((t) => {
-                  const active = lfo.target === t.key
-                  return (
-                    <button
-                      key={t.key}
-                      onClick={() => setLfo({ target: t.key })}
-                      disabled={!lfo.enabled}
-                      title={t.description}
-                      className={`rounded-full px-3 py-1 text-xs transition ${
-                        active
-                          ? 'bg-lab-accent font-semibold text-white'
-                          : 'bg-slate-100 text-lab-mute hover:bg-slate-200'
-                      }`}
-                    >
-                      {t.label}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <div className="text-xs font-semibold text-lab-mute">波形</div>
-              <div className="flex flex-wrap gap-2">
-                {LFO_WAVEFORMS.map((w) => {
-                  const active = lfo.waveform === w.key
-                  return (
-                    <button
-                      key={w.key}
-                      onClick={() => setLfo({ waveform: w.key })}
-                      disabled={!lfo.enabled}
-                      className={`rounded-full px-3 py-1 text-xs transition ${
-                        active
-                          ? 'bg-lab-accent font-semibold text-white'
-                          : 'bg-slate-100 text-lab-mute hover:bg-slate-200'
-                      }`}
-                    >
-                      {w.label}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-semibold text-lab-mute">レート</span>
-                <span className="font-mono text-lab-ink">{lfo.rate.toFixed(2)} Hz</span>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.001}
-                value={toRateSlider(lfo.rate)}
-                onChange={(e) => setLfo({ rate: fromRateSlider(parseFloat(e.target.value)) })}
-                disabled={!lfo.enabled}
-                className="w-full accent-lab-accent"
-              />
-              <div className="flex justify-between text-[10px] text-lab-mute">
-                <span>0.1Hz</span><span>1Hz</span><span>5Hz</span><span>20Hz</span>
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-semibold text-lab-mute">深さ</span>
-                <span className="font-mono text-lab-ink">{(lfo.depth * 100).toFixed(0)} %</span>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={lfo.depth}
-                onChange={(e) => setLfo({ depth: parseFloat(e.target.value) })}
-                disabled={!lfo.enabled}
-                className="w-full accent-lab-accent"
-              />
-            </div>
-          </div>
-        </div>
+        {/* LFO 1 / LFO 2 — 同じレイアウトを再利用、行き先は独立に選べる */}
+        <LfoPanel title="LFO 1" lfo={lfo} onChange={setLfo} />
+        <LfoPanel title="LFO 2" lfo={lfo2} onChange={setLfo2} />
       </div>
 
       {/* ピッチベンド (リアルタイム演奏コントロール) */}

@@ -4,6 +4,19 @@ import { getPreset } from '../lib/wavetablePresets'
 import { ENV_PRESETS } from '../lib/envelopePresets'
 import { AudioEngine } from '../audio/AudioEngine'
 import { DEFAULT_SEQUENCER_STATE, Sequencer } from '../audio/sequencer'
+import {
+  BANK_COUNT,
+  defaultFx,
+  loadBanksFromStorage,
+  patchFromToneBank,
+  persistBanksToStorage,
+  serializeBanks,
+  deserializeBanks,
+  toneBankFromPatch,
+  type BanksState,
+  type SeqBank,
+  type ToneBank,
+} from '../lib/banks'
 
 // 波形エディタの UI 状態。ステップ切替で WaveformEditor が unmount されても保持したいため store に置く。
 type WaveEditorMode = 'draw' | 'formula'
@@ -20,6 +33,10 @@ type SynthStore = {
   // 波形エディタのモードと数式入力テキスト
   waveEditorMode: WaveEditorMode
   waveEditorFormula: string
+  // バンク機能（音色 5 + シーケンサー 5）と「最後に読み込んだバンク」マーカー
+  banks: BanksState
+  activeToneBank: number | null  // 0..BANK_COUNT-1
+  activeSeqBank: number | null
   setStep: (s: StepId) => void
   setWavetable: (w: Float32Array) => void
   setEnvelope: (e: Partial<Envelope>) => void
@@ -28,6 +45,7 @@ type SynthStore = {
   setFilterQ: (q: number) => void
   setFilterEnvelope: (p: Partial<FilterEnvelope>) => void
   setLfo: (p: Partial<LfoParams>) => void
+  setLfo2: (p: Partial<LfoParams>) => void
   setFxEnabled: (id: FxId, enabled: boolean) => void
   setFxParam: (id: FxId, name: string, value: number) => void
   moveFx: (id: FxId, direction: 'up' | 'down') => void
@@ -38,30 +56,35 @@ type SynthStore = {
   setActiveEnvelopePresetKey: (key: string | undefined) => void
   setWaveEditorMode: (m: WaveEditorMode) => void
   setWaveEditorFormula: (f: string) => void
+  loadToneBank: (index: number) => void
+  saveToneBank: (index: number) => void
+  loadSeqBank: (index: number) => void
+  saveSeqBank: (index: number) => void
+  clearBank: (kind: 'tone' | 'seq', index: number) => void
+  exportBanksAsJson: () => string
+  importBanksFromJson: (json: string) => void
+  resetPatch: () => void
   markAudioReady: () => void
 }
 
-const initialFx: FxChainState = {
-  order: ['distortion', 'bitcrusher', 'chorus', 'phaser', 'delay', 'reverb'],
-  fx: {
-    distortion: { enabled: false, params: { drive: 20, tone: 3000, wet: 0.5 } },
-    bitcrusher: { enabled: false, params: { bits: 6, downsample: 4, wet: 0.5 } },
-    chorus:     { enabled: false, params: { rate: 1.2, depth: 0.5, wet: 0.5 } },
-    phaser:     { enabled: false, params: { rate: 0.4, depth: 0.7, feedback: 0.5, wet: 0.5 } },
-    delay:      { enabled: false, params: { time: 0.35, feedback: 0.4, wet: 0.35 } },
-    reverb:     { enabled: false, params: { decay: 2.5, wet: 0.3 } },
-  },
+// 初期パッチをファクトリ化（リセット用に毎回新しいインスタンスが必要）。
+// FxChainState は banks.ts の defaultFx と共有する（値の二重管理を避けるため）。
+function makeInitialPatch(): SynthPatch {
+  return {
+    wavetable: getPreset('sine').generate(),
+    envelope: { ...ENV_PRESETS[0].envelope }, // ピアノ風
+    filter: { cutoff: 12000, type: 'lowpass', q: 0.0001 },
+    filterEnvelope: { enabled: false, attack: 0.01, decay: 0.4, sustain: 0.0, release: 0.3, depth: 3000 },
+    lfo: { enabled: false, waveform: 'sine', rate: 5, depth: 0.3, target: 'amp' },
+    lfo2: { enabled: false, waveform: 'triangle', rate: 3, depth: 0.3, target: 'filter' },
+    fx: defaultFx(),
+    sequencer: { ...DEFAULT_SEQUENCER_STATE, steps: DEFAULT_SEQUENCER_STATE.steps.map((s) => ({ ...s })) },
+  }
 }
 
-const initialPatch: SynthPatch = {
-  wavetable: getPreset('sine').generate(),
-  envelope: ENV_PRESETS[0].envelope, // ピアノ風
-  filter: { cutoff: 12000, type: 'lowpass', q: 0.0001 },
-  filterEnvelope: { enabled: false, attack: 0.01, decay: 0.4, sustain: 0.0, release: 0.3, depth: 3000 },
-  lfo: { enabled: false, waveform: 'sine', rate: 5, depth: 0.3, target: 'amp' },
-  fx: initialFx,
-  sequencer: DEFAULT_SEQUENCER_STATE,
-}
+const initialPatch: SynthPatch = makeInitialPatch()
+
+const initialBanks: BanksState = loadBanksFromStorage()
 
 export const useSynthStore = create<SynthStore>((set, get) => ({
   patch: initialPatch,
@@ -72,6 +95,9 @@ export const useSynthStore = create<SynthStore>((set, get) => ({
   activeEnvelopePresetKey: 'piano',
   waveEditorMode: 'draw',
   waveEditorFormula: 'sin(x)',
+  banks: initialBanks,
+  activeToneBank: null,
+  activeSeqBank: null,
 
   setStep: (s) => set({ step: s }),
 
@@ -121,6 +147,13 @@ export const useSynthStore = create<SynthStore>((set, get) => ({
     const patch = { ...get().patch, lfo }
     set({ patch })
     AudioEngine.setLfo(p)
+  },
+
+  setLfo2: (p) => {
+    const lfo2 = { ...get().patch.lfo2, ...p }
+    const patch = { ...get().patch, lfo2 }
+    set({ patch })
+    AudioEngine.setLfo2(p)
   },
 
   setFxEnabled: (id, enabled) => {
@@ -181,6 +214,111 @@ export const useSynthStore = create<SynthStore>((set, get) => ({
   setWaveEditorMode: (m) => set({ waveEditorMode: m }),
 
   setWaveEditorFormula: (f) => set({ waveEditorFormula: f }),
+
+  loadToneBank: (index) => {
+    if (index < 0 || index >= BANK_COUNT) return
+    const bank = get().banks.tone[index]
+    if (!bank) return  // 空バンクは無視
+    const patch: SynthPatch = patchFromToneBank(bank, get().patch.sequencer)
+    set({
+      patch,
+      activePresetKey: bank.ui.activePresetKey,
+      activeEnvelopePresetKey: bank.ui.activeEnvelopePresetKey,
+      waveEditorMode: bank.ui.waveEditorMode ?? 'draw',
+      waveEditorFormula: bank.ui.waveEditorFormula ?? 'sin(x)',
+      activeToneBank: index,
+    })
+    AudioEngine.applyPatch(patch)
+  },
+
+  saveToneBank: (index) => {
+    if (index < 0 || index >= BANK_COUNT) return
+    const s = get()
+    const label = s.banks.tone[index]?.label ?? `バンク ${index + 1}`
+    const next: ToneBank = toneBankFromPatch(
+      s.patch,
+      {
+        activePresetKey: s.activePresetKey,
+        activeEnvelopePresetKey: s.activeEnvelopePresetKey,
+        waveEditorMode: s.waveEditorMode,
+        waveEditorFormula: s.waveEditorFormula,
+      },
+      label,
+    )
+    const tone = [...s.banks.tone]
+    tone[index] = next
+    const banks: BanksState = { ...s.banks, tone }
+    set({ banks, activeToneBank: index })
+    persistBanksToStorage(banks)
+  },
+
+  loadSeqBank: (index) => {
+    if (index < 0 || index >= BANK_COUNT) return
+    const bank = get().banks.seq[index]
+    if (!bank) return
+    const sequencer: SequencerState = {
+      ...bank.sequencer,
+      steps: bank.sequencer.steps.map((st) => ({ ...st })),
+    }
+    set({ patch: { ...get().patch, sequencer }, activeSeqBank: index })
+    Sequencer.setConfig(sequencer)
+  },
+
+  saveSeqBank: (index) => {
+    if (index < 0 || index >= BANK_COUNT) return
+    const s = get()
+    const label = s.banks.seq[index]?.label ?? `バンク ${index + 1}`
+    const next: SeqBank = {
+      label,
+      sequencer: { ...s.patch.sequencer, steps: s.patch.sequencer.steps.map((st) => ({ ...st })) },
+    }
+    const seq = [...s.banks.seq]
+    seq[index] = next
+    const banks: BanksState = { ...s.banks, seq }
+    set({ banks, activeSeqBank: index })
+    persistBanksToStorage(banks)
+  },
+
+  clearBank: (kind, index) => {
+    if (index < 0 || index >= BANK_COUNT) return
+    const s = get()
+    if (kind === 'tone') {
+      const tone = [...s.banks.tone]
+      tone[index] = null
+      const banks: BanksState = { ...s.banks, tone }
+      set({ banks, activeToneBank: s.activeToneBank === index ? null : s.activeToneBank })
+      persistBanksToStorage(banks)
+    } else {
+      const seq = [...s.banks.seq]
+      seq[index] = null
+      const banks: BanksState = { ...s.banks, seq }
+      set({ banks, activeSeqBank: s.activeSeqBank === index ? null : s.activeSeqBank })
+      persistBanksToStorage(banks)
+    }
+  },
+
+  exportBanksAsJson: () => serializeBanks(get().banks),
+
+  importBanksFromJson: (json) => {
+    const banks = deserializeBanks(json)
+    set({ banks, activeToneBank: null, activeSeqBank: null })
+    persistBanksToStorage(banks)
+  },
+
+  resetPatch: () => {
+    const patch = makeInitialPatch()
+    set({
+      patch,
+      activePresetKey: 'sine',
+      activeEnvelopePresetKey: 'piano',
+      waveEditorMode: 'draw',
+      waveEditorFormula: 'sin(x)',
+      activeToneBank: null,
+      activeSeqBank: null,
+    })
+    AudioEngine.applyPatch(patch)
+    Sequencer.setConfig(patch.sequencer)
+  },
 
   markAudioReady: () => set({ audioReady: true }),
 }))

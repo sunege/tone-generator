@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { useSynthStore } from './store/synthStore'
 import { AudioEngine } from './audio/AudioEngine'
 import { Stepper } from './components/Stepper'
+import { BankBar } from './components/BankBar'
 import { Step1Waveform } from './pages/Step1Waveform'
 import { Step2Envelope } from './pages/Step2Envelope'
 import { Step3Filter } from './pages/Step3Filter'
@@ -20,6 +21,8 @@ export function App() {
   const audioReady = useSynthStore((s) => s.audioReady)
   const markAudioReady = useSynthStore((s) => s.markAudioReady)
   const patch = useSynthStore((s) => s.patch)
+  const loadToneBank = useSynthStore((s) => s.loadToneBank)
+  const loadSeqBank = useSynthStore((s) => s.loadSeqBank)
 
   const handleStart = async () => {
     try {
@@ -31,24 +34,36 @@ export function App() {
     }
   }
 
-  // ArrowLeft / ArrowRight でステップ切替。入力フォーカス中は無効化（スライダーの値変更などを邪魔しない）
+  // ArrowLeft / ArrowRight でステップ切替、1〜5 で音色バンクロード、Shift+1〜5 でシーケンサーバンクロード。
+  // 入力フォーカス中（テキスト/数値入力など）は無効化してフォーム編集を邪魔しない。
   useEffect(() => {
     if (!audioReady) return
     const handler = (e: KeyboardEvent) => {
-      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
       const target = e.target as HTMLElement | null
       if (target) {
         const tag = target.tagName.toLowerCase()
         if (tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable) return
       }
-      e.preventDefault()
-      const delta = e.key === 'ArrowRight' ? 1 : -1
-      const next = Math.max(MIN_STEP, Math.min(MAX_STEP, step + delta)) as StepId
-      if (next !== step) setStep(next)
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault()
+        const delta = e.key === 'ArrowRight' ? 1 : -1
+        const next = Math.max(MIN_STEP, Math.min(MAX_STEP, step + delta)) as StepId
+        if (next !== step) setStep(next)
+        return
+      }
+      // Shift 修飾以外（Cmd/Ctrl/Alt）は OS ショートカット競合回避のためスキップ
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      // "1" 〜 "5"（Shift 押下中は Shift+数字 になっても e.code は Digit1 等で安定）
+      if (/^Digit[1-5]$/.test(e.code)) {
+        e.preventDefault()
+        const idx = parseInt(e.code.slice(5), 10) - 1
+        if (e.shiftKey) loadSeqBank(idx)
+        else loadToneBank(idx)
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [audioReady, step, setStep])
+  }, [audioReady, step, setStep, loadToneBank, loadSeqBank])
 
   if (!audioReady) {
     return (
@@ -83,6 +98,9 @@ export function App() {
             </p>
           </div>
           <Stepper current={step} onChange={setStep} />
+        </div>
+        <div className="mx-auto max-w-6xl border-t border-lab-line px-4 py-2">
+          <BankBar />
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-4 py-6">

@@ -72,6 +72,7 @@ export type SynthPatch = {
   filter: FilterParams
   filterEnvelope: FilterEnvelope
   lfo: LfoParams
+  lfo2: LfoParams
   fx: FxChainState
   sequencer: SequencerState
 }
