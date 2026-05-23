@@ -8,6 +8,7 @@ import {
   BANK_COUNT,
   defaultFx,
   loadBanksFromStorage,
+  makeInitialBanks,
   patchFromToneBank,
   persistBanksToStorage,
   serializeBanks,
@@ -63,6 +64,7 @@ type SynthStore = {
   clearBank: (kind: 'tone' | 'seq', index: number) => void
   exportBanksAsJson: () => string
   importBanksFromJson: (json: string) => void
+  resetBanksToDemo: () => void
   resetPatch: () => void
   markAudioReady: () => void
 }
@@ -301,6 +303,12 @@ export const useSynthStore = create<SynthStore>((set, get) => ({
 
   importBanksFromJson: (json) => {
     const banks = deserializeBanks(json)
+    set({ banks, activeToneBank: null, activeSeqBank: null })
+    persistBanksToStorage(banks)
+  },
+
+  resetBanksToDemo: () => {
+    const banks = makeInitialBanks()
     set({ banks, activeToneBank: null, activeSeqBank: null })
     persistBanksToStorage(banks)
   },

@@ -138,95 +138,107 @@ export function Step6Effects() {
         ]}
       />
 
-      <div className="space-y-3">
-        {fxState.order.map((id, idx) => {
-          const meta = FX_META[id]
-          const st = fxState.fx[id]
-          const isFirst = idx === 0
-          const isLast = idx === fxState.order.length - 1
-          return (
-            <div
-              key={id}
-              className={`rounded-lg border p-3 transition ${meta.accent} ${
-                st.enabled ? '' : 'opacity-60'
-              }`}
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white text-xs font-bold text-lab-ink">
-                  {idx + 1}
-                </span>
-                <span className="text-sm font-semibold text-lab-ink">{meta.label}</span>
-                <div className="ml-auto flex items-center gap-1">
-                  <button
-                    onClick={() => moveFx(id, 'up')}
-                    disabled={isFirst}
-                    title="チェーン内で1つ前に移動"
-                    className="rounded bg-white px-2 py-1 text-xs text-lab-mute hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-30"
-                  >
-                    ↑
-                  </button>
-                  <button
-                    onClick={() => moveFx(id, 'down')}
-                    disabled={isLast}
-                    title="チェーン内で1つ後ろに移動"
-                    className="rounded bg-white px-2 py-1 text-xs text-lab-mute hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-30"
-                  >
-                    ↓
-                  </button>
-                  <label className="ml-2 flex cursor-pointer items-center gap-1 text-xs">
-                    <input
-                      type="checkbox"
-                      checked={st.enabled}
-                      onChange={(e) => setFxEnabled(id, e.target.checked)}
-                      className="accent-lab-accent"
-                    />
-                    <span className={st.enabled ? 'font-semibold text-lab-ink' : 'text-lab-mute'}>
-                      {st.enabled ? 'ON' : 'OFF'}
-                    </span>
-                  </label>
+      {/*
+        2-column layout (lg 以上):
+          - 左 (2fr): FX チェーン縦並び。スクロールしながら任意のエフェクトを編集
+          - 右 (1fr): Oscilloscope / FFT を縦スタックで sticky
+        lg 未満 (タブレット・モバイル) では 1 列に縦積みで従来通り。
+        self-start を付けて sticky が grid のコンテナ高さに引っ張られないようにする。
+      */}
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        {/* 左: FX チェーン */}
+        <div className="space-y-3">
+          {fxState.order.map((id, idx) => {
+            const meta = FX_META[id]
+            const st = fxState.fx[id]
+            const isFirst = idx === 0
+            const isLast = idx === fxState.order.length - 1
+            return (
+              <div
+                key={id}
+                className={`rounded-lg border p-3 transition ${meta.accent} ${
+                  st.enabled ? '' : 'opacity-60'
+                }`}
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white text-xs font-bold text-lab-ink">
+                    {idx + 1}
+                  </span>
+                  <span className="text-sm font-semibold text-lab-ink">{meta.label}</span>
+                  <div className="ml-auto flex items-center gap-1">
+                    <button
+                      onClick={() => moveFx(id, 'up')}
+                      disabled={isFirst}
+                      title="チェーン内で1つ前に移動"
+                      className="rounded bg-white px-2 py-1 text-xs text-lab-mute hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-30"
+                    >
+                      ↑
+                    </button>
+                    <button
+                      onClick={() => moveFx(id, 'down')}
+                      disabled={isLast}
+                      title="チェーン内で1つ後ろに移動"
+                      className="rounded bg-white px-2 py-1 text-xs text-lab-mute hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-30"
+                    >
+                      ↓
+                    </button>
+                    <label className="ml-2 flex cursor-pointer items-center gap-1 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={st.enabled}
+                        onChange={(e) => setFxEnabled(id, e.target.checked)}
+                        className="accent-lab-accent"
+                      />
+                      <span className={st.enabled ? 'font-semibold text-lab-ink' : 'text-lab-mute'}>
+                        {st.enabled ? 'ON' : 'OFF'}
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                <p className="mt-1 text-[11px] text-lab-mute">{meta.hint}</p>
+
+                {/* 右サイド固定で横幅が狭くなったので、スライダーは sm/lg ともに 2 列に揃える */}
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  {meta.params.map((p) => {
+                    const value = st.params[p.name] ?? 0
+                    return (
+                      <div key={p.name} className="space-y-0.5">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="font-semibold text-lab-mute">{p.label}</span>
+                          <span className="font-mono text-lab-ink">{p.format ? p.format(value) : value.toFixed(2)}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={p.min}
+                          max={p.max}
+                          step={p.step}
+                          value={value}
+                          onChange={(e) => setFxParam(id, p.name, parseFloat(e.target.value))}
+                          disabled={!st.enabled}
+                          className="w-full accent-lab-accent"
+                        />
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
+            )
+          })}
+        </div>
 
-              <p className="mt-1 text-[11px] text-lab-mute">{meta.hint}</p>
-
-              <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                {meta.params.map((p) => {
-                  const value = st.params[p.name] ?? 0
-                  return (
-                    <div key={p.name} className="space-y-0.5">
-                      <div className="flex items-center justify-between text-[11px]">
-                        <span className="font-semibold text-lab-mute">{p.label}</span>
-                        <span className="font-mono text-lab-ink">{p.format ? p.format(value) : value.toFixed(2)}</span>
-                      </div>
-                      <input
-                        type="range"
-                        min={p.min}
-                        max={p.max}
-                        step={p.step}
-                        value={value}
-                        onChange={(e) => setFxParam(id, p.name, parseFloat(e.target.value))}
-                        disabled={!st.enabled}
-                        className="w-full accent-lab-accent"
-                      />
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          )
-        })}
+        {/* 右: ライブ可視化（sticky）。top-2 はヘッダーがスクロールアウトした後に画面上部に張り付く位置 */}
+        <div className="space-y-3 lg:sticky lg:top-2 lg:self-start">
+          <Oscilloscope
+            getAnalyser={AudioEngine.getAnalyserOut}
+            getFrequency={getFrequency}
+            title="演奏中の波形 (FX 後)"
+          />
+          <FFTDisplay getAnalyser={AudioEngine.getAnalyserOut} title="FFT スペクトル (FX 後)" />
+        </div>
       </div>
 
       <Keyboard />
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Oscilloscope
-          getAnalyser={AudioEngine.getAnalyserOut}
-          getFrequency={getFrequency}
-          title="演奏中の波形 (FX 後)"
-        />
-        <FFTDisplay getAnalyser={AudioEngine.getAnalyserOut} title="FFT スペクトル (FX 後)" />
-      </div>
     </div>
   )
 }

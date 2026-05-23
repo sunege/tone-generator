@@ -83,6 +83,17 @@ export function Step5Advanced() {
         ]}
       />
 
+      {/*
+        Step6 と同じ 2 カラム構成:
+          - 左 (2fr): Filter / FilterEnv / LFO×2 / PitchBend を縦並び
+          - 右 (1fr): Oscilloscope / FFT を縦スタックで sticky
+        lg 未満では 1 列に縦積み（右パネルもインラインで下に来る）。
+      */}
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        {/* 左カラム: 各パラメータ */}
+        <div className="space-y-4">
+
+      {/* 行 1: フィルター + フィルターエンベロープ */}
       <div className="grid gap-4 lg:grid-cols-2">
         {/* フィルター設定 */}
         <div className="space-y-3 rounded-lg border border-lab-line bg-white p-4">
@@ -261,7 +272,10 @@ export function Step5Advanced() {
           </div>
         </div>
 
-        {/* LFO 1 / LFO 2 — 同じレイアウトを再利用、行き先は独立に選べる */}
+      </div>
+
+      {/* 行 2: LFO 1 / LFO 2 — 同じレイアウトを再利用、行き先は独立に選べる */}
+      <div className="grid gap-4 lg:grid-cols-2">
         <LfoPanel title="LFO 1" lfo={lfo} onChange={setLfo} />
         <LfoPanel title="LFO 2" lfo={lfo2} onChange={setLfo2} />
       </div>
@@ -295,16 +309,22 @@ export function Step5Advanced() {
         </p>
       </div>
 
-      <Keyboard />
+        </div>
+        {/* /左カラム */}
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Oscilloscope
-          getAnalyser={AudioEngine.getAnalyserPost}
-          getFrequency={getFrequency}
-          title="演奏中の波形（オシロ）"
-        />
-        <FFTDisplay getAnalyser={AudioEngine.getAnalyserPost} title="FFTスペクトル（演奏中）" />
+        {/* 右カラム: ライブ可視化（sticky） */}
+        <div className="space-y-3 lg:sticky lg:top-2 lg:self-start">
+          <Oscilloscope
+            getAnalyser={AudioEngine.getAnalyserPost}
+            getFrequency={getFrequency}
+            title="演奏中の波形（オシロ）"
+          />
+          <FFTDisplay getAnalyser={AudioEngine.getAnalyserPost} title="FFTスペクトル（演奏中）" />
+        </div>
       </div>
+      {/* /2 カラムグリッド */}
+
+      <Keyboard />
     </div>
   )
 }

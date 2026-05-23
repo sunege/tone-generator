@@ -14,12 +14,30 @@ type Props = {
    * Step7 ステップシーケンサーで Sequencer.setRoot にバインドして使用。
    */
   onRootChange?: (midi: number | null) => void
+  /**
+   * ホールドモード。Step7 シーケンサー用の「押した鍵が継続して鳴る」挙動。
+   * - 同じ鍵を再押下 → 停止
+   * - 別の鍵を押下 → その鍵に root を切替（前のホールドは解除）
+   * - キーリリース → 何もしない
+   * モード切替時は状態リセット（押している音は止まる）。
+   */
+  holdMode?: boolean
 }
 
-export function Keyboard({ startMidi = 48, octaves = 3, onRootChange }: Props) {
+export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode = false }: Props) {
   const [activeMidi, setActiveMidi] = useState<number | null>(null)
   const setCurrentFreq = useSynthStore((s) => s.setCurrentFreq)
   const pcBaseMidi = 60 // PCキーボードの "a" を C4 に割当
+  // ホールドモード時のみ使用。押し続けの heldRef（モノ stack）とは独立に
+  // 「セッション中にホールドしている root」を保持する。
+  const heldRootRef = useRef<number | null>(null)
+  // PC キーボードハンドラは useEffect([]) で 1 回だけ登録されるため、
+  // クロージャ越しの holdMode prop は初回マウント時の値を見続けてしまう。
+  // ref に最新値を同期しておき、press/release は常にこれを参照する。
+  const holdModeRef = useRef(holdMode)
+  useEffect(() => {
+    holdModeRef.current = holdMode
+  }, [holdMode])
 
   // 鍵盤に含まれる MIDI 番号
   const keys = useMemo(() => {
@@ -35,6 +53,27 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange }: Props) {
   const heldRef = useRef<number[]>([])
 
   const press = (midi: number) => {
+    if (holdModeRef.current) {
+      // 同じ鍵の再押下 → 停止
+      if (heldRootRef.current === midi) {
+        heldRootRef.current = null
+        if (onRootChange) onRootChange(null)
+        else AudioEngine.noteOff()
+        setActiveMidi(null)
+        setCurrentFreq(null)
+        return
+      }
+      // 別の鍵 → root 切替（前のホールドは暗黙的に解除）
+      heldRootRef.current = midi
+      const freq = midiToFreq(midi)
+      if (onRootChange) onRootChange(midi)
+      else AudioEngine.noteOn(freq)
+      setActiveMidi(midi)
+      setCurrentFreq(freq)
+      return
+    }
+
+    // 通常モード: モノフォニック last-press 優先
     const idx = heldRef.current.indexOf(midi)
     if (idx >= 0) heldRef.current.splice(idx, 1)
     heldRef.current.push(midi)
@@ -50,6 +89,9 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange }: Props) {
   }
 
   const release = (midi: number) => {
+    // ホールドモードではキーリリースは何もしない（root は次の press まで継続）
+    if (holdModeRef.current) return
+
     const idx = heldRef.current.indexOf(midi)
     if (idx >= 0) heldRef.current.splice(idx, 1)
 
@@ -77,6 +119,7 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange }: Props) {
 
   const releaseAll = () => {
     heldRef.current = []
+    heldRootRef.current = null
     if (onRootChange) {
       onRootChange(null)
     } else {
@@ -85,6 +128,18 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange }: Props) {
     setActiveMidi(null)
     setCurrentFreq(null)
   }
+
+  // ホールドモード切替時は鍵盤状態を全リセット（鳴り続け事故防止）。
+  // 初回マウントでは何もしない。
+  const isInitialMount = useRef(true)
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false
+      return
+    }
+    releaseAll()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holdMode])
 
   // PC キーボード
   useEffect(() => {
@@ -128,10 +183,19 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange }: Props) {
   const whiteX = new Map<number, number>()
   whiteKeys.forEach((m, i) => whiteX.set(m, i * whiteWidth))
 
+  // ホールド中の色（青系の通常 active と区別するため amber 系を使用）
+  const heldWhiteColor = '#fed7aa'   // tailwind orange-200
+  const heldBlackColor = '#c2410c'   // tailwind orange-700
+  const activeWhiteColor = '#bae6fd' // tailwind sky-200
+  const activeBlackColor = '#0369a1' // tailwind sky-700
+
   return (
     <div className="rounded-lg border border-lab-line bg-white p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-lab-mute">
-        <span className="font-semibold">ピアノ鍵盤</span>
+        <span className="font-semibold">
+          ピアノ鍵盤
+          {holdMode && <span className="ml-2 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold text-orange-700">🔒 HOLD</span>}
+        </span>
         <span>PCキーボード: <code className="rounded bg-slate-100 px-1">a w s e d f t g y h u j k o l p ;</code> (C4〜E5)</span>
       </div>
       <div className="overflow-x-auto">
@@ -144,6 +208,7 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange }: Props) {
           {whiteKeys.map((m) => {
             const x = whiteX.get(m)!
             const active = activeMidi === m
+            const fill = active ? (holdMode ? heldWhiteColor : activeWhiteColor) : '#ffffff'
             return (
               <g key={`w-${m}`}>
                 <rect
@@ -151,7 +216,7 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange }: Props) {
                   y={0}
                   width={whiteWidth}
                   height={whiteHeight}
-                  fill={active ? '#bae6fd' : '#ffffff'}
+                  fill={fill}
                   stroke="#94a3b8"
                   strokeWidth={1}
                   onPointerDown={(e) => {
@@ -182,6 +247,7 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange }: Props) {
             if (baseX === undefined) return null
             const x = baseX + whiteWidth - blackWidth / 2
             const active = activeMidi === m
+            const fill = active ? (holdMode ? heldBlackColor : activeBlackColor) : '#0f172a'
             return (
               <rect
                 key={`b-${m}`}
@@ -189,7 +255,7 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange }: Props) {
                 y={0}
                 width={blackWidth}
                 height={blackHeight}
-                fill={active ? '#0369a1' : '#0f172a'}
+                fill={fill}
                 stroke="#0f172a"
                 onPointerDown={(e) => {
                   e.preventDefault()
@@ -205,12 +271,13 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange }: Props) {
         </svg>
       </div>
       <div className="mt-2 text-xs text-lab-mute">
-        発音中:{' '}
+        {holdMode ? 'ホールド中' : '発音中'}:{' '}
         {activeMidi !== null ? (
           <>
-            <span className="font-mono font-semibold text-lab-ink">{midiToName(activeMidi)}</span>
+            <span className={`font-mono font-semibold ${holdMode ? 'text-orange-700' : 'text-lab-ink'}`}>{midiToName(activeMidi)}</span>
             {' / '}
             <span className="font-mono">{midiToFreq(activeMidi).toFixed(1)} Hz</span>
+            {holdMode && <span className="ml-1">🔒</span>}
           </>
         ) : (
           <span className="font-mono text-lab-mute">None</span>

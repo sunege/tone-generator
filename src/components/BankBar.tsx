@@ -104,11 +104,18 @@ export function BankBar() {
   const exportBanks = useSynthStore((s) => s.exportBanksAsJson)
   const importBanks = useSynthStore((s) => s.importBanksFromJson)
   const resetPatch = useSynthStore((s) => s.resetPatch)
+  const resetBanksToDemo = useSynthStore((s) => s.resetBanksToDemo)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const handleReset = () => {
     if (confirm('全パラメータを初期値に戻しますか？\n（バンクの保存内容は維持されます）')) {
       resetPatch()
+    }
+  }
+
+  const handleResetBanks = () => {
+    if (confirm('全バンク（音色 5 + シーケンサー 5）を初期デモに戻しますか？\nユーザーが保存した内容はすべて失われます。')) {
+      resetBanksToDemo()
     }
   }
 
@@ -137,62 +144,76 @@ export function BankBar() {
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
-      <BankGroup
-        kind="tone"
-        label="🎛️ 音色"
-        keyHint="1〜5"
-        accent="sky"
-        banks={banks.tone}
-        activeIndex={activeToneBank}
-        onLoad={loadToneBank}
-        onSave={saveToneBank}
-      />
-      <BankGroup
-        kind="seq"
-        label="🎼 シーケンサー"
-        keyHint="Shift+1〜5"
-        accent="emerald"
-        banks={banks.seq}
-        activeIndex={activeSeqBank}
-        onLoad={loadSeqBank}
-        onSave={saveSeqBank}
-      />
-      <div className="ml-auto flex items-center gap-2">
-        <button
-          onClick={handleReset}
-          className="rounded-md border border-rose-300 bg-rose-50 px-2 py-1 text-xs font-medium text-rose-700 hover:bg-rose-100"
-          title="現在のパラメータをすべて初期値に戻す（バンクは保持）"
-        >
-          ⟲ デフォルト
-        </button>
-        <span className="h-5 w-px bg-lab-line" />
-        <button
-          onClick={handleExport}
-          className="rounded-md border border-lab-line bg-white px-2 py-1 text-xs text-lab-ink hover:bg-slate-50"
-          title="現在のバンク全体を JSON ファイルに書き出す"
-        >
-          📤 書き出し
-        </button>
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="rounded-md border border-lab-line bg-white px-2 py-1 text-xs text-lab-ink hover:bg-slate-50"
-          title="JSON ファイルから全バンクを置き換える"
-        >
-          📥 読み込み
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="application/json,.json"
-          className="hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0]
-            if (f) handleImport(f)
-            e.target.value = ''
-          }}
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+        <BankGroup
+          kind="tone"
+          label="🎛️ 音色"
+          keyHint="1〜5"
+          accent="sky"
+          banks={banks.tone}
+          activeIndex={activeToneBank}
+          onLoad={loadToneBank}
+          onSave={saveToneBank}
         />
+        <BankGroup
+          kind="seq"
+          label="🎼 シーケンサー"
+          keyHint="Shift+1〜5"
+          accent="emerald"
+          banks={banks.seq}
+          activeIndex={activeSeqBank}
+          onLoad={loadSeqBank}
+          onSave={saveSeqBank}
+        />
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={handleReset}
+            className="rounded-md border border-rose-300 bg-rose-50 px-2 py-1 text-xs font-medium text-rose-700 hover:bg-rose-100"
+            title="現在のパラメータをすべて初期値に戻す（バンクは保持）"
+          >
+            ⟲ デフォルト
+          </button>
+          <button
+            onClick={handleResetBanks}
+            className="rounded-md border border-rose-300 bg-rose-50 px-2 py-1 text-xs font-medium text-rose-700 hover:bg-rose-100"
+            title="全バンク（音色 5 + シーケンサー 5）を初期デモに戻す（保存済みのユーザー内容は失われる）"
+          >
+            🔄 デモ復元
+          </button>
+          <span className="h-5 w-px bg-lab-line" />
+          <button
+            onClick={handleExport}
+            className="rounded-md border border-lab-line bg-white px-2 py-1 text-xs text-lab-ink hover:bg-slate-50"
+            title="現在のバンク全体を JSON ファイルに書き出す"
+          >
+            📤 書き出し
+          </button>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="rounded-md border border-lab-line bg-white px-2 py-1 text-xs text-lab-ink hover:bg-slate-50"
+            title="JSON ファイルから全バンクを置き換える"
+          >
+            📥 読み込み
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              if (f) handleImport(f)
+              e.target.value = ''
+            }}
+          />
+        </div>
       </div>
+      <p className="text-[10px] leading-tight text-lab-mute">
+        ※ バンクの保存先は<strong className="font-semibold">このブラウザ</strong>（localStorage）。
+        リロードやタブを閉じても残りますが、別ブラウザ・別端末・シークレットウィンドウとは共有されません。
+        持ち運びは <span className="font-mono">📤 書き出し</span> / <span className="font-mono">📥 読み込み</span> で JSON 経由。
+      </p>
     </div>
   )
 }

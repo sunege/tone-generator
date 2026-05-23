@@ -21,85 +21,149 @@ There is no test suite. Verify changes by running `npm run build` (typecheck is 
 
 ### Audio pipeline (single mono voice)
 
-Built on Web Audio API. One AudioContext, one signal chain, shared across all four pages. Created lazily on first user gesture in `App.tsx` (`AudioEngine.start()`).
+Built on Web Audio API. One AudioContext, one signal chain, shared across all seven pages. Created lazily on first user gesture in `App.tsx` (`AudioEngine.start()`).
 
 ```
-[AudioWorklet wavetable-processor]
+[AudioWorklet wavetable-processor]        ← exposes 'detune' AudioParam (cents)
         │
         ▼
-   [GainNode envGain]            ← ADSR (or bypassed to fixed gain)
+   [GainNode envGain]                     ← amplitude ADSR (or bypassed to RAW_GAIN)
         │
         ▼
-   [AnalyserNode analyserPre]    ← Step3 "filter前 FFT/Oscillo"
+   [GainNode lfoAmpGain]                  ← LFO sum bus for target=amp (base 1.0)
         │
         ▼
-   [BiquadFilterNode (lowpass)]  ← Step3 cutoff slider (or bypassed to 20kHz)
+   [AnalyserNode analyserPre]             ← Step3 "filter前 FFT/Oscillo"
         │
         ▼
-   [AnalyserNode analyserPost]   ← all other FFT/Oscilloscope panels
+   [BiquadFilterNode]                     ← Step3/5: type/cutoff/Q (or bypassed to lowpass 20kHz)
+        │  ⇐ additive: filter ADSR (ConstantSource → filterEnvDepth → filter.frequency)
+        │  ⇐ additive: LFO depth (target=filter)
+        ▼
+   [AnalyserNode analyserPost]            ← most FFT/Oscilloscope panels
         │
         ▼
-   [GainNode master] → destination
+   [GainNode master]
+        │
+        ├──► [GainNode chainDry] ──────────────────────►┐
+        │                                                │
+        └──► [FxChain (6 effects, dynamic order)]       │
+              └──► [GainNode chainWet] ─────────────────►┤
+                                                         │
+                                            [AnalyserNode analyserOut]  ← Step6 post-FX FFT/Oscillo
+                                                         │
+                                                         ▼
+                                                 ctx.destination
 ```
 
-- The wavetable processor (`public/worklet/wavetable-processor.js`) holds a `Float32Array(1024)` and does phase-accumulator playback with linear interpolation. It receives `{type: 'wavetable', data}` and `{type: 'frequency', value}` via `port.postMessage`.
-- **The worklet file is intentionally in `public/`** (not `src/`) so Vite serves it as a static asset; it must be loadable via `audioWorklet.addModule('/worklet/wavetable-processor.js')`.
-- AnalyserNodes provide both `getFloatFrequencyData` (for FFT panels) **and** `getFloatTimeDomainData` (for Oscilloscope). Each panel just calls the appropriate method on the same shared analyser.
+- **Two AudioWorklets**, both in `public/worklet/` (served as static assets by Vite, loaded via `audioWorklet.addModule('/worklet/<name>.js')`):
+  - `wavetable-processor.js` — `Float32Array(1024)` phase accumulator with linear interpolation; AudioParam `detune` (cents) is the modulation entry point used by LFO target=pitch and `setPitchBend()`.
+  - `bitcrusher-processor.js` — `bits` + `downsample` AudioParams (quantization + sample-and-hold).
+- **LFO × 2**: Two `OscillatorNode + GainNode` pairs (`lfoOsc/lfoDepth`, `lfoOsc2/lfoDepth2`). Each slot dynamically `connect/disconnect`s to one of three destinations (`lfoAmpGain.gain`, `filter.frequency`, worklet `detune`). Both slots may target the same destination; signals sum additively. The currently connected target per slot is tracked in `lfoConnectedTo: (LfoTarget | null)[]` so disconnect is correct.
+- **Filter envelope**: `ConstantSource(1)` → `filterEnvDepth.gain` (driven by an ADSR) → `filter.frequency`. Additive with the base cutoff and any LFO targeting filter — both modulators stack naturally.
+- **FX chain** (`src/audio/fx.ts`): 6 effects (delay, reverb, chorus, phaser, distortion, bitcrusher) wired serially. `master` splits into `chainDry` (always-on bypass tap) and the FX chain → `chainWet`; both sum into `analyserOut`. `setFxChainBypass()` crossfades dry↔wet (`dry=1,wet=0` when bypassed).
+- AnalyserNodes provide both `getFloatFrequencyData` (FFT panels) **and** `getFloatTimeDomainData` (Oscilloscope). Each panel just calls the appropriate method on the same shared analyser.
 
-### Bypass flags (envelopeBypass / filterBypass)
+### Bypass flags (envelope / filter / lfo / fxChain)
 
-Each step page can independently bypass envelope and/or filter so users hear isolated effects. State lives in `AudioEngine.ts` as module-scoped flags:
+Each step page bypasses subsystems it doesn't teach so users hear isolated effects. Module-scoped flags in `AudioEngine.ts`:
 
 - `envelopeBypass`: `noteOn` skips ADSR and ramps `envGain` to `RAW_GAIN (0.5)` in 5ms; `noteOff` ramps back to `SILENT` in 10ms.
-- `filterBypass`: filter `frequency` is forced to 20kHz (effectively transparent); `setCutoff` still writes to the patch but does not touch the live node.
+- `filterBypass`: filter forced to lowpass 20kHz / Q≈0; `setFilterType/Q/Cutoff` still write `currentPatch` but don't touch the live node. Filter envelope contribution is reset to 0 too.
+- `lfoBypass`: both LFO slots disconnected from their targets (the per-slot apply function reads this flag).
+- `fxChainBypass`: dry/wet crossfade as above.
 
-Pages sync their toggle state via `useEffect`:
+Pages sync toggle state via `useEffect` (example):
 ```ts
 useEffect(() => { AudioEngine.setEnvelopeBypass(!applyEnvelope) }, [applyEnvelope])
-useEffect(() => { AudioEngine.setFilterBypass(!applyFilter) }, [applyFilter])
 ```
 
-**Always reset both flags to `false` in the unmount cleanup** so they don't leak to other steps. Step defaults:
-- Step1: both OFF by default (raw waveform sound)
-- Step2: envelope ON, filter OFF
-- Step3: envelope OFF, filter ON
-- Step4: both ON
+**Always reset bypass flags in unmount cleanup** so they don't leak to other steps. Approximate defaults per step (consult each page's `useEffect` for the exact pattern):
 
-### Envelope (ADSR) gotchas — read before touching `src/audio/envelope.ts`
+| step | env | filter | lfo | fx |
+|------|-----|--------|-----|-----|
+| 1 波形 | bypass | bypass | bypass | bypass |
+| 2 音の変化 | apply | bypass | bypass | bypass |
+| 3 フィルター | bypass | apply | bypass | bypass |
+| 4 演奏 | apply | apply | bypass | bypass |
+| 5 アドバンスド | apply | apply | apply | bypass |
+| 6 エフェクター | apply | apply | apply | apply |
+| 7 シーケンサー | apply | apply | apply | apply |
 
-The release-during-attack and attack-while-decaying transitions are subtle. Two non-obvious rules baked into the current code:
+(Step 5 also drives the filter envelope and pitch-bend slider; Step 6 is the only place the FX chain is audible; Step 7 runs the sequencer with everything live.)
 
-1. **Don't call `setValueAtTime(gain.value, ctxTime)` after `cancelAndHoldAtTime`.** `AudioParam.value` returns the last *explicitly set* value, not the current automation value. Using it as an anchor overrides the correct held value with stale data — this manifests as silent releases (MIN→MIN ramp).
-2. **`triggerAttack` must include a 2ms `linearRamp` down to MIN before the actual attack.** Without this, the very first attack after ADSR parameter changes (or after a long idle) starts from an indeterminate value in Chrome, because `cancelAndHoldAtTime` does not always anchor when there is no prior automation event.
+### Envelope (ADSR) gotchas — applies to `src/audio/envelope.ts` and `src/audio/filterEnvelope.ts`
 
-The `holdAt()` helper centralizes the cancelAndHoldAtTime call with a fallback for old browsers.
+Both ADSR modules share the same pattern. Chrome's `cancelAndHoldAtTime` does **not** anchor reliably when no prior automation event exists, and `AudioParam.value` returns the last *explicitly set* value (not the current automation value). Three non-obvious rules baked in:
+
+1. **Don't use `gain.value` after `cancelAndHoldAtTime`.** It returns stale data and produces silent ramps (manifests as no audible release, "プツッ" click). Instead, both `envelope.ts` and `filterEnvelope.ts` track attack info in a module-level variable (`lastAttack`) and **compute the current envelope value in JS**, then write it with `setValueAtTime` before the ramp. `triggerRelease` always anchors from the JS-computed value, not from `gain.value`.
+2. **`triggerAttack` includes a 2ms `linearRamp` down to MIN before the actual attack** to handle the indeterminate-value case after long idles or ADSR-parameter changes. `filterEnvelope.ts` uses `FE_QUICK_RESET = 0.002` for the same reason.
+3. **Sustain-phase release must re-anchor**: when the user releases a held key after reaching sustain, the JS state knows the sustain value — write it explicitly before the release ramp. Relying on `cancelAndHoldAtTime` alone produces a silent release.
+
+`envelope.ts` provides a `holdAt()` helper that centralises the cancelAndHoldAtTime call with a fallback for old browsers.
 
 ### Oscilloscope sync (`src/components/Oscilloscope.tsx`)
 
 Uses zero-crossing trigger (negative→positive) with sub-sample linear interpolation so the displayed wave appears stationary. **Horizontal window is fixed at 1 period of A3 (220Hz)** regardless of the playing pitch — this lets students visually compare wavelengths across notes (higher note = more cycles visible in the same window).
 
-Reads current frequency via `useSynthStore.getState().currentFreq`. When `freq` is null or buffer peak is below `SILENCE_THRESHOLD (0.005)`, shows only a center line.
+`SILENCE_THRESHOLD = 0.0005` (-66 dB) and the component caches the last-known trigger frequency in `lastFreqRef`. This lets the scope keep drawing during:
+- Long Release tails (note has been released but envelope is still decaying)
+- Delay / Reverb echoes (signal continues after the dry note ends)
 
-Pages must update `synthStore.currentFreq` when starting/stopping notes. **Do not clear `currentFreq` on note release** — keep it set so the oscilloscope can visualize the Release tail; silence detection handles fade-out automatically.
+Pages update `synthStore.currentFreq` when starting notes. **Do not clear `currentFreq` on note release** — silence detection + `lastFreqRef` handle fade-out automatically. When the signal drops below threshold and no current freq exists, the scope shows only a center line.
 
 ### State management
 
-Zustand store (`src/store/synthStore.ts`) holds the canonical `SynthPatch` (wavetable + envelope + filter), plus UI state (`step`, `currentFreq`, `audioReady`). Setters update the store **and** push to `AudioEngine` synchronously (e.g., `setWavetable` also calls `AudioEngine.setWavetable`). This keeps the store and audio nodes in lock-step without a separate sync layer.
+Zustand store (`src/store/synthStore.ts`) holds:
+
+- **`patch: SynthPatch`** — wavetable + envelope + filter + filterEnvelope + lfo + lfo2 + fx + sequencer
+- **UI state** — `step`, `currentFreq`, `audioReady`, `activePresetKey`, `activeEnvelopePresetKey`, `waveEditorMode`, `waveEditorFormula`
+- **Bank state** — `banks`, `activeToneBank`, `activeSeqBank` (see [Bank feature](#bank-feature))
+
+Granular setters update the store **and** push to `AudioEngine` synchronously (e.g., `setWavetable` also calls `AudioEngine.setWavetable`). Bulk patch updates (bank load, reset) go through `AudioEngine.applyPatch(patch)` which atomically reapplies wavetable / filter / filter-envelope / both LFOs / FX chain while respecting current bypass flags. The initial patch is built via `makeInitialPatch()` so the reset action returns fresh object instances (not aliased to the boot-time patch).
+
+### Bank feature (`src/lib/banks.ts`, `src/components/BankBar.tsx`)
+
+5 tone banks + 5 sequencer banks, persisted to `localStorage` under the versioned key `tone-generator:banks:v2` (bump both `STORAGE_KEY` and `SCHEMA_VERSION` together when the bank format changes — older saves are simply discarded).
+
+- **Click cell** = load; **long-press 700 ms** = save (progress fill animation in the cell).
+- **Keyboard `1`-`5`** = load tone bank; **`Shift+1`-`5`** = load sequencer bank. Handler in `App.tsx` skips digit keys when an input/textarea has focus, so number entry in sliders/formula isn't hijacked.
+- **Bank 1 ships with demo content** (ピアノ音色 / メジャースケール上昇). Banks 2–5 carry additional demos (clarinet, bell, lead, 8-bit / arpeggio variants).
+- **`⟲ デフォルト` button** in `BankBar` calls `resetPatch()` (with a `confirm()` dialog) which restores `makeInitialPatch()` and clears `activeToneBank`/`activeSeqBank` markers. Bank contents are preserved.
+- **JSON export/import** (`exportBanksAsJson` / `importBanksFromJson`): single file holds both bank kinds; `SCHEMA_VERSION` is checked on import. `Float32Array` (wavetable) is converted to `number[]` only at the JSON boundary.
+- Tone banks contain everything **except** `sequencer`; sequencer is its own bank kind so phrases and sounds can be A/B-tested independently.
+
+`loadToneBank` calls `AudioEngine.applyPatch`; `loadSeqBank` calls `Sequencer.setConfig`. Both are seamless mid-note (worklet phase is continuous) and mid-sequence (the scheduler reads config on each tick).
 
 ### Page structure
 
-`App.tsx` switches between 4 pages by `step` value (no router):
-- `Step1Waveform` — handwrite/formula/preset editor, oscilloscope + FFT
+`App.tsx` switches between 7 pages by `step` value (no router). Arrow keys (←/→) navigate steps; digit keys (1-5, Shift+1-5) trigger bank loads — both skip when an input is focused.
+
+- `Step1Waveform` — handwrite / formula / preset editor, oscilloscope + FFT
 - `Step2Envelope` — SVG-drag ADSR editor with press-and-hold test note
 - `Step3Filter` — cutoff slider, pre/post FFT and oscilloscope comparison
-- `Step4Play` — SVG piano keyboard (mono, last-press-priority) + PC keyboard mapping
+- `Step4Play` — SVG piano (mono, last-press-priority) + PC keyboard mapping
+- `Step5Advanced` — filter type/Q, filter envelope (ADSR + bipolar depth), LFO × 2 (target ∈ amp/filter/pitch), pitch bend slider
+- `Step6Effects` — 6 FX with per-effect params, reorderable serial chain, post-FX scope
+- `Step7Sequencer` — 32-step arpeggiator (BPM / division / length / gate / per-step ±semitones), monophonic root from keyboard
 
-The `Keyboard.tsx` component implements monophonic last-note-priority via a `heldRef` stack. When a key is released but others remain held, it uses `AudioEngine.setFrequency()` (pitch-only, no re-attack) for legato behavior; only the last released note triggers `noteOff()`.
+The `Keyboard.tsx` component implements monophonic last-note-priority via a `heldRef` stack. When a key is released but others remain held, it uses `AudioEngine.setFrequency()` (pitch-only, no re-attack) for legato. It accepts an optional `onRootChange?: (midi | null) => void` prop — when provided (Step7), it overrides direct AudioEngine calls so the sequencer can take over note triggering.
+
+### Step sequencer (`src/audio/sequencer.ts`)
+
+`setTimeout`-based scheduler running at `bpm × division` cadence. Acceptable jitter (~4 ms) for educational tempos. Public API:
+
+- `setRoot(midi)` from the keyboard starts playback at step 0; `setRoot(null)` stops and resets.
+- The current note is held for `gate × stepDur`; `gate === 1` means legato (no explicit noteOff — the next noteOn overlaps).
+- Pattern edits via `setSeqStep` push updates synchronously; the next tick sees the new pattern.
+- `setConfig(state)` swaps the entire `SequencerState` atomically (used by bank loads and by Step7 control changes).
 
 ## Conventions
 
 - **Bypass flags reset on unmount** is mandatory. Easy to forget; causes silent bugs in adjacent steps.
-- Test playback uses **440Hz (A4)** everywhere — earlier code used 220Hz which is hard to hear for sine waves.
+- Test playback uses **440 Hz (A4)** everywhere — earlier code used 220 Hz which is hard to hear for sine waves.
 - Long-text labels in panel headers use `h-5 overflow-hidden truncate` + `shrink-0 whitespace-nowrap` to prevent layout shift when dynamic labels grow.
 - Buttons that toggle between states (`▶ 再生` / `■ 停止`) use fixed `h-10 w-64` to keep the click target stable.
 - Tailwind palette uses custom `lab-*` colors (defined in `tailwind.config.js`) for the "lab/experiment room" theme — prefer these over arbitrary hex.
+- Bank save uses **long-press** (not click) to avoid accidental overwrites; loading is a single click for snappy A/B comparison.
+- When adding a new patch field: update `makeInitialPatch()` in `synthStore.ts`, the demo banks in `banks.ts`, and `AudioEngine.applyPatch()` if the field is audio-bound. The bank serializer handles structural JSON via spread — only `Float32Array` (wavetable) needs special conversion.

@@ -44,6 +44,8 @@ export function Step7Sequencer() {
 
   // 再生中のハイライト用（-1 は停止中）
   const [currentStep, setCurrentStep] = useState<number>(-1)
+  // ホールドモード（鍵盤を一度押すとシーケンサーが鳴り続ける）
+  const [holdMode, setHoldMode] = useState(false)
 
   const getFrequency = useCallback(() => useSynthStore.getState().currentFreq, [])
 
@@ -245,10 +247,30 @@ export function Step7Sequencer() {
 
       {/* 鍵盤（onRootChange で Sequencer に伝える） */}
       <div>
-        <p className="mb-2 text-xs text-lab-mute">
-          鍵盤を <strong>押している間だけ</strong> シーケンサーが動作します。押した音が度数 1（root）です。
-        </p>
-        <Keyboard onRootChange={handleRootChange} />
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs text-lab-mute">
+            {holdMode ? (
+              <>
+                <strong>ホールド ON</strong>: 一度押すとシーケンサーが鳴り続けます。
+                別の鍵で root 切替、同じ鍵を再度押すと停止。
+              </>
+            ) : (
+              <>鍵盤を <strong>押している間だけ</strong> シーケンサーが動作します。押した音が度数 1（root）です。</>
+            )}
+          </p>
+          <label className="flex cursor-pointer items-center gap-2 rounded-full border border-lab-line bg-white px-3 py-1 text-xs">
+            <input
+              type="checkbox"
+              checked={holdMode}
+              onChange={(e) => setHoldMode(e.target.checked)}
+              className="accent-orange-500"
+            />
+            <span className={holdMode ? 'font-semibold text-orange-700' : 'text-lab-mute'}>
+              🔒 ホールド機能 {holdMode ? 'ON' : 'OFF'}
+            </span>
+          </label>
+        </div>
+        <Keyboard onRootChange={handleRootChange} holdMode={holdMode} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
