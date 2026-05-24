@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSynthStore } from '../store/synthStore'
 import { EnvelopeEditor } from '../components/EnvelopeEditor'
 import { PresetSelector } from '../components/PresetSelector'
@@ -20,6 +20,7 @@ export function Step2Envelope() {
   const [holding, setHolding] = useState(false)
   // フィルター適用の ON/OFF。デフォルトは適用なし（フィルターはバイパスして純粋に ADSR の効果だけを聞く）
   const [applyFilter, setApplyFilter] = useState(false)
+  const playBtnRef = useRef<HTMLButtonElement>(null)
 
   const getFrequency = useCallback(() => useSynthStore.getState().currentFreq, [])
 
@@ -57,6 +58,18 @@ export function Step2Envelope() {
     }
   }, [setCurrentFreq])
 
+  // iOS Safari のタッチ不発バグ対策: button にも native touchstart を passive:false で登録し、
+  // preventDefault することで OS がボタンタップを zoom/scroll 判定するのを抑止する。
+  useEffect(() => {
+    const btn = playBtnRef.current
+    if (!btn) return
+    const onTouchStart = (e: TouchEvent) => {
+      e.preventDefault()
+    }
+    btn.addEventListener('touchstart', onTouchStart, { passive: false })
+    return () => btn.removeEventListener('touchstart', onTouchStart)
+  }, [])
+
   return (
     <div className="space-y-4">
       <header>
@@ -76,13 +89,14 @@ export function Step2Envelope() {
 
       <div className="flex flex-wrap items-center gap-3">
         <button
+          ref={playBtnRef}
           onPointerDown={(e) => {
             e.preventDefault()
-            ;(e.target as Element).setPointerCapture(e.pointerId)
             startNote()
           }}
           onPointerUp={stopNote}
           onPointerCancel={stopNote}
+          onPointerLeave={() => { if (holding) stopNote() }}
           onKeyDown={(e) => {
             if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) {
               e.preventDefault()
@@ -96,10 +110,10 @@ export function Step2Envelope() {
             }
           }}
           onContextMenu={(e) => e.preventDefault()}
-          className={`inline-flex h-10 w-64 select-none items-center justify-center rounded-full text-sm font-semibold text-white shadow transition ${
+          className={`inline-flex h-10 w-64 select-none items-center justify-center rounded-full text-sm font-semibold text-white shadow transition touch-none ${
             holding ? 'bg-rose-500' : 'bg-emerald-500 hover:bg-emerald-600'
           }`}
-          style={{ touchAction: 'none' }}
+          style={{ WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}
         >
           {holding ? '🔊 発音中… 離すと停止' : '▶ 押している間 440Hz を発音'}
         </button>
