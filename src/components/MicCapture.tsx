@@ -22,7 +22,8 @@ type Captured = {
 const LIVE_HEIGHT = 120
 const PREVIEW_HEIGHT = 120
 const WIDE_HEIGHT = 160
-const MARKER_HIT_TOL = 14 // px
+// 指タッチでも掴みやすいよう少し広め。マウス精度では支障なし。
+const MARKER_HIT_TOL = 24 // px
 
 function freqToNoteName(freq: number): string {
   const midi = Math.round(69 + 12 * Math.log2(freq / 440))
@@ -232,6 +233,8 @@ export function MicCapture({ onTransfer, onOverlay, overlayActive }: Props) {
   }, [captured])
 
   // ----- マーカードラッグ -----
+  // iOS Safari の setPointerCapture バグ回避のため capture は使わず、
+  // pointerleave/cancel でドラッグを終了する仕様にする。
   const handlePointerDown = (e: React.PointerEvent) => {
     if (!captured) return
     const canvas = wideCanvasRef.current
@@ -249,7 +252,6 @@ export function MicCapture({ onTransfer, onOverlay, overlayActive }: Props) {
     } else {
       return
     }
-    canvas.setPointerCapture(e.pointerId)
     e.preventDefault()
   }
 
@@ -269,16 +271,32 @@ export function MicCapture({ onTransfer, onOverlay, overlayActive }: Props) {
     }
   }
 
-  const handlePointerUp = (e: React.PointerEvent) => {
-    if (dragRef.current && wideCanvasRef.current) {
-      try {
-        wideCanvasRef.current.releasePointerCapture(e.pointerId)
-      } catch {
-        /* ignore */
-      }
-    }
+  const handlePointerUp = () => {
     dragRef.current = null
   }
+
+  // iOS Safari の canvas タッチ不発バグ対策: native touchstart を passive:false で登録し、
+  // ハンドル付近の touch のみ preventDefault して OS のスクロール捕獲を抑止する。
+  // ハンドルから離れた位置の touch は普通にページスクロール出来るようにする（誤抑止防止）。
+  useEffect(() => {
+    const canvas = wideCanvasRef.current
+    if (!canvas) return
+    const onTouchStart = (e: TouchEvent) => {
+      if (!captured) return
+      const t = e.touches[0]
+      if (!t) return
+      const rect = canvas.getBoundingClientRect()
+      const x = t.clientX - rect.left
+      const startX = (captured.start / captured.raw.length) * rect.width
+      const endX = (captured.end / captured.raw.length) * rect.width
+      // ハンドル付近なら OS の scroll/zoom を抑止
+      if (Math.abs(x - startX) < MARKER_HIT_TOL || Math.abs(x - endX) < MARKER_HIT_TOL) {
+        e.preventDefault()
+      }
+    }
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false })
+    return () => canvas.removeEventListener('touchstart', onTouchStart)
+  }, [captured])
 
   // ----- マイク制御 -----
   const enable = async () => {
@@ -415,11 +433,13 @@ export function MicCapture({ onTransfer, onOverlay, overlayActive }: Props) {
           </div>
           <canvas
             ref={wideCanvasRef}
-            style={{ width: '100%', height: WIDE_HEIGHT, touchAction: 'none', cursor: dragRef.current ? 'ew-resize' : 'pointer' }}
+            className="touch-none"
+            style={{ width: '100%', height: WIDE_HEIGHT, cursor: dragRef.current ? 'ew-resize' : 'pointer', userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerUp}
+            onPointerLeave={handlePointerUp}
           />
         </div>
       )}
