@@ -103,19 +103,23 @@ export function Step6Effects() {
 
   const getFrequency = useCallback(() => useSynthStore.getState().currentFreq, [])
 
-  // 入室時に FX チェーンをアクティブ化、退室時にバイパス
+  // 入室時に FX チェーンをアクティブ化、退室時にバイパス。
+  // ホールド演奏中は noteOff / setCurrentFreq(null) をスキップして step 跨ぎの継続再生を維持。
   useEffect(() => {
     AudioEngine.setEnvelopeBypass(false)
     AudioEngine.setFilterBypass(false)
     AudioEngine.setLfoBypass(false)
     AudioEngine.setFxChainBypass(false)
     return () => {
-      AudioEngine.noteOff()
+      const sustaining = useSynthStore.getState().playSustain !== null
+      if (!sustaining) {
+        AudioEngine.noteOff()
+        setCurrentFreq(null)
+      }
       AudioEngine.setEnvelopeBypass(false)
       AudioEngine.setFilterBypass(false)
       AudioEngine.setLfoBypass(true)
       AudioEngine.setFxChainBypass(true)  // 他ステップに FX が漏れないようバイパス
-      setCurrentFreq(null)
     }
   }, [setCurrentFreq])
 

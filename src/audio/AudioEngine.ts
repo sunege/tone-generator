@@ -38,10 +38,21 @@ type EngineState = {
 let state: EngineState | null = null
 let currentPatch: SynthPatch | null = null
 let noteActive = false
+// 実際にエンジンに適用されている bypass 値（後述の sustainOverride による override 反映後）
 let envelopeBypass = false
 let filterBypass = false
 let lfoBypass = false
 let fxChainBypass = true   // デフォルトで FX バイパス（Steps 1-5 は素の音）
+// 各 step useEffect が「設計上こうしたい」と要求した bypass 値を保持。
+// sustainOverride 中は実際の bypass はすべて false に強制されるが、
+// override 解除時にこの requested 値に戻す。
+let requestedEnvelopeBypass = false
+let requestedFilterBypass = false
+let requestedLfoBypass = false
+let requestedFxChainBypass = true
+// 「ホールド演奏中はチェーンをフルにして bypass 要求を無視する」モード。
+// step 遷移しても演奏が継続するようにするため、各 step の bypass 設定を上書きする。
+let sustainOverride = false
 // スロットごとに「現在どこに接続されているか」を覚えておく（正しく disconnect するため）
 const lfoConnectedTo: (LfoTarget | null)[] = [null, null]
 
@@ -122,6 +133,50 @@ function applyLfoSlot(slot: LfoSlot) {
 function applyAllLfos() {
   applyLfoSlot(1)
   applyLfoSlot(2)
+}
+
+// requested 値 + sustainOverride から実 bypass を決める。
+// sustainOverride=true の間はすべて false（フルチェーン）を返す。
+function effectiveBypass(req: boolean): boolean {
+  return sustainOverride ? false : req
+}
+
+// 各 bypass の「effective 値で audio graph を更新する」内部関数群。
+// 公開 setter とは別に切り出してあるのは、setSustainOverride からも一括再適用する必要があるため。
+function applyEnvelopeBypassEffective() {
+  envelopeBypass = effectiveBypass(requestedEnvelopeBypass)
+  // envelopeBypass は noteOn/noteOff 内で参照されるだけなので audio graph は触らない
+}
+
+function applyFilterBypassEffective() {
+  const enabled = effectiveBypass(requestedFilterBypass)
+  filterBypass = enabled
+  if (!state || !currentPatch) return
+  const t = state.ctx.currentTime
+  if (enabled) {
+    state.filter.type = 'lowpass'
+    state.filter.Q.setTargetAtTime(0.0001, t, 0.01)
+    state.filter.frequency.setTargetAtTime(RAW_FILTER_HZ, t, 0.01)
+    resetFilterEnvelope(state.filterEnvDepth.gain, t)
+  } else {
+    state.filter.type = currentPatch.filter.type as BiquadFilterType
+    state.filter.Q.setTargetAtTime(currentPatch.filter.q, t, 0.01)
+    state.filter.frequency.setTargetAtTime(currentPatch.filter.cutoff, t, 0.01)
+  }
+}
+
+function applyLfoBypassEffective() {
+  lfoBypass = effectiveBypass(requestedLfoBypass)
+  applyAllLfos()
+}
+
+function applyFxChainBypassEffective() {
+  const enabled = effectiveBypass(requestedFxChainBypass)
+  fxChainBypass = enabled
+  if (!state) return
+  const t = state.ctx.currentTime
+  state.chainDry.gain.setTargetAtTime(enabled ? 1 : 0, t, 0.02)
+  state.chainWet.gain.setTargetAtTime(enabled ? 0 : 1, t, 0.02)
 }
 
 async function ensureContext(): Promise<EngineState> {
@@ -288,26 +343,16 @@ export const AudioEngine = {
     state.filter.Q.setTargetAtTime(clamped, state.ctx.currentTime, 0.01)
   },
 
+  // 各 step useEffect が「ここでは X を bypass したい」と申告する。
+  // sustainOverride=true の間は実効値は false で固定（ホールド演奏が止まらないように）。
   setEnvelopeBypass(enabled: boolean) {
-    envelopeBypass = enabled
+    requestedEnvelopeBypass = enabled
+    applyEnvelopeBypassEffective()
   },
 
   setFilterBypass(enabled: boolean) {
-    filterBypass = enabled
-    if (!state || !currentPatch) return
-    const t = state.ctx.currentTime
-    if (enabled) {
-      // バイパス: 透過状態（lowpass 20kHz / Q=0）+ filter envelope の寄与も 0 に戻す
-      state.filter.type = 'lowpass'
-      state.filter.Q.setTargetAtTime(0.0001, t, 0.01)
-      state.filter.frequency.setTargetAtTime(RAW_FILTER_HZ, t, 0.01)
-      resetFilterEnvelope(state.filterEnvDepth.gain, t)
-    } else {
-      // 解除: patch の type/Q/cutoff を復元
-      state.filter.type = currentPatch.filter.type as BiquadFilterType
-      state.filter.Q.setTargetAtTime(currentPatch.filter.q, t, 0.01)
-      state.filter.frequency.setTargetAtTime(currentPatch.filter.cutoff, t, 0.01)
-    }
+    requestedFilterBypass = enabled
+    applyFilterBypassEffective()
   },
 
   setLfo(partial: Partial<LfoParams>) {
@@ -342,11 +387,24 @@ export const AudioEngine = {
 
   // FX チェーン全体のバイパス（Step6 入退室時に切替）
   setFxChainBypass(enabled: boolean) {
-    fxChainBypass = enabled
-    if (!state) return
-    const t = state.ctx.currentTime
-    state.chainDry.gain.setTargetAtTime(enabled ? 1 : 0, t, 0.02)
-    state.chainWet.gain.setTargetAtTime(enabled ? 0 : 1, t, 0.02)
+    requestedFxChainBypass = enabled
+    applyFxChainBypassEffective()
+  },
+
+  /**
+   * ホールド演奏中フラグ。true にすると envelope/filter/lfo/fxChain の bypass 要求がすべて
+   * false 扱いになり、step 遷移しても音が途切れない。false に戻すと requested 値が再適用される。
+   */
+  setSustainOverride(enabled: boolean) {
+    sustainOverride = enabled
+    applyEnvelopeBypassEffective()
+    applyFilterBypassEffective()
+    applyLfoBypassEffective()
+    applyFxChainBypassEffective()
+  },
+
+  isSustainOverride(): boolean {
+    return sustainOverride
   },
 
   setFxEnabled(id: FxId, enabled: boolean) {
@@ -368,8 +426,8 @@ export const AudioEngine = {
   },
 
   setLfoBypass(enabled: boolean) {
-    lfoBypass = enabled
-    applyAllLfos()
+    requestedLfoBypass = enabled
+    applyLfoBypassEffective()
   },
 
   /**

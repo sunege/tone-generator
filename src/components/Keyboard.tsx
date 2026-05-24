@@ -1,47 +1,48 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { isBlackKey, midiToFreq, midiToName, midiToSolfege, KEY_TO_MIDI_OFFSET } from '../lib/noteUtils'
 import { AudioEngine } from '../audio/AudioEngine'
+import { Sequencer } from '../audio/sequencer'
 import { useSynthStore } from '../store/synthStore'
 
 type Props = {
   startMidi?: number    // 一番左の白鍵 (デフォルト C3=48)
   octaves?: number      // オクターブ数
-  /**
-   * 指定するとデフォルトの AudioEngine 直叩きを抑制し、押下中のルート MIDI を通知する。
-   * - 押下: 新しい MIDI（最後に押された鍵）
-   * - レガート中の離鍵: 残っている最新の MIDI
-   * - 全離鍵: null
-   * Step7 ステップシーケンサーで Sequencer.setRoot にバインドして使用。
-   */
-  onRootChange?: (midi: number | null) => void
-  /**
-   * ホールドモード。Step7 シーケンサー用の「押した鍵が継続して鳴る」挙動。
-   * - 同じ鍵を再押下 → 停止
-   * - 別の鍵を押下 → その鍵に root を切替（前のホールドは解除）
-   * - キーリリース → 何もしない
-   * モード切替時は状態リセット（押している音は止まる）。
-   */
-  holdMode?: boolean
 }
 
-export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode = false }: Props) {
+/**
+ * 鍵盤。すべての挙動を store 駆動で行うため、外部からはプロップ不要。
+ *
+ * 2 つのトグル（store: keyboardHold / sequencerEnabled）を内部ヘッダーに表示。
+ *  - ホールド ON: 同じ鍵を再押下するまで音が止まらない。step を跨いでも継続。
+ *  - シーケンサー ON: 押下した鍵をルートとしてシーケンサーが演奏。
+ *  - 両方 ON: ホールドかつシーケンサーで step 遷移後も演奏継続。
+ *
+ * ホールド演奏中（playSustain != null）は AudioEngine.setSustainOverride(true) によって
+ * envelope/filter/lfo/fxChain の bypass 要求がすべて無視され、フルチェーン再生になる。
+ * これにより step 1（波形のみ）に移動しても ADSR/FX が効いた音が鳴り続ける。
+ */
+export function Keyboard({ startMidi = 48, octaves = 3 }: Props) {
   const [activeMidi, setActiveMidi] = useState<number | null>(null)
   const setCurrentFreq = useSynthStore((s) => s.setCurrentFreq)
+  const keyboardHold = useSynthStore((s) => s.keyboardHold)
+  const sequencerEnabled = useSynthStore((s) => s.sequencerEnabled)
+  const playSustain = useSynthStore((s) => s.playSustain)
+  const setKeyboardHold = useSynthStore((s) => s.setKeyboardHold)
+  const setSequencerEnabled = useSynthStore((s) => s.setSequencerEnabled)
+  const startSustain = useSynthStore((s) => s.startSustain)
   const pcBaseMidi = 60 // PCキーボードの "a" を C4 に割当
+
   // SVG への native touchstart リスナを attach するための ref。
   // iOS Safari は inline style の touch-action を無視する版があるため、
   // 直接 touchstart を passive:false で preventDefault する必要がある。
   const svgRef = useRef<SVGSVGElement>(null)
-  // ホールドモード時のみ使用。押し続けの heldRef（モノ stack）とは独立に
-  // 「セッション中にホールドしている root」を保持する。
-  const heldRootRef = useRef<number | null>(null)
-  // PC キーボードハンドラは useEffect([]) で 1 回だけ登録されるため、
-  // クロージャ越しの holdMode prop は初回マウント時の値を見続けてしまう。
-  // ref に最新値を同期しておき、press/release は常にこれを参照する。
-  const holdModeRef = useRef(holdMode)
-  useEffect(() => {
-    holdModeRef.current = holdMode
-  }, [holdMode])
+
+  // PC キーボードハンドラは useEffect([]) で 1 回だけ登録される。
+  // store の最新値を参照したいので ref に常時同期。
+  const holdRef = useRef(keyboardHold)
+  const seqRef = useRef(sequencerEnabled)
+  useEffect(() => { holdRef.current = keyboardHold }, [keyboardHold])
+  useEffect(() => { seqRef.current = sequencerEnabled }, [sequencerEnabled])
 
   // 鍵盤に含まれる MIDI 番号
   const keys = useMemo(() => {
@@ -53,7 +54,8 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
 
   const whiteKeys = keys.filter((m) => !isBlackKey(m))
 
-  // 「最後に押された鍵優先」のモノフォニック挙動のため、押下中の鍵を順序保持する
+  // 「最後に押された鍵優先」のモノフォニック挙動のため、押下中の鍵を順序保持する。
+  // 非ホールドモードでのみ使用。
   const heldRef = useRef<number[]>([])
   // タッチ／マウスのドラッグで鍵をまたいだときに「現在指の下にある鍵」を追跡。
   // iOS Safari の setPointerCapture バグ回避のため pointer 1 つだけ追従し、
@@ -62,23 +64,9 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
   const dragPointerRef = useRef<number | null>(null)
 
   const press = (midi: number) => {
-    if (holdModeRef.current) {
-      // 同じ鍵の再押下 → 停止
-      if (heldRootRef.current === midi) {
-        heldRootRef.current = null
-        if (onRootChange) onRootChange(null)
-        else AudioEngine.noteOff()
-        setActiveMidi(null)
-        setCurrentFreq(null)
-        return
-      }
-      // 別の鍵 → root 切替（前のホールドは暗黙的に解除）
-      heldRootRef.current = midi
-      const freq = midiToFreq(midi)
-      if (onRootChange) onRootChange(midi)
-      else AudioEngine.noteOn(freq)
-      setActiveMidi(midi)
-      setCurrentFreq(freq)
+    // ホールドモード: store 経由で sustain を起動・切替・停止（同 midi なら停止）
+    if (holdRef.current) {
+      startSustain(midi)
       return
     }
 
@@ -88,8 +76,8 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
     heldRef.current.push(midi)
 
     const freq = midiToFreq(midi)
-    if (onRootChange) {
-      onRootChange(midi)
+    if (seqRef.current) {
+      Sequencer.setRoot(midi)
     } else {
       AudioEngine.noteOn(freq)
     }
@@ -99,14 +87,14 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
 
   const release = (midi: number) => {
     // ホールドモードではキーリリースは何もしない（root は次の press まで継続）
-    if (holdModeRef.current) return
+    if (holdRef.current) return
 
     const idx = heldRef.current.indexOf(midi)
     if (idx >= 0) heldRef.current.splice(idx, 1)
 
     if (heldRef.current.length === 0) {
-      if (onRootChange) {
-        onRootChange(null)
+      if (seqRef.current) {
+        Sequencer.setRoot(null)
       } else {
         AudioEngine.noteOff()
       }
@@ -117,8 +105,8 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
     // 残っている最新の鍵に音程だけ切り替え（エンベロープは再アタックしない＝レガート）
     const nextMidi = heldRef.current[heldRef.current.length - 1]
     const nextFreq = midiToFreq(nextMidi)
-    if (onRootChange) {
-      onRootChange(nextMidi)
+    if (seqRef.current) {
+      Sequencer.setRoot(nextMidi)
     } else {
       AudioEngine.setFrequency(nextFreq)
     }
@@ -128,11 +116,11 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
 
   const releaseAll = () => {
     heldRef.current = []
-    heldRootRef.current = null
     dragMidiRef.current = null
     dragPointerRef.current = null
-    if (onRootChange) {
-      onRootChange(null)
+    if (holdRef.current) return  // ホールド中の演奏は維持する
+    if (seqRef.current) {
+      Sequencer.setRoot(null)
     } else {
       AudioEngine.noteOff()
     }
@@ -141,13 +129,12 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
   }
 
   // ドラッグ中に指が別の鍵に乗ったときの遷移。
-  // press() を呼ぶと heldRef に新 midi が push されるが、前のドラッグ midi も
-  // heldRef に残ったままになるため、ここで明示的に取り除いてからレガート移行する。
-  // これによりリリース時に古いドラッグ鍵に「戻る」誤動作を防止する。
+  // 非ホールド時はリリース時に古いドラッグ鍵へ「戻る」誤動作を防ぐため heldRef から除去。
+  // ホールド時は store の switchSustainRoot が直接呼ばれるので heldRef を触らない。
   const dragMoveTo = (newMidi: number) => {
     const prev = dragMidiRef.current
     if (prev === newMidi) return
-    if (prev !== null) {
+    if (prev !== null && !holdRef.current) {
       const idx = heldRef.current.indexOf(prev)
       if (idx >= 0) heldRef.current.splice(idx, 1)
     }
@@ -169,7 +156,6 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
   }
 
   // pointerup / pointerleave / pointercancel いずれもドラッグ終了として扱う。
-  // 指が SVG 外で離されたケースは pointerleave 側で先に拾える。
   const handleSvgPointerEnd = (e: React.PointerEvent<SVGSVGElement>) => {
     if (dragPointerRef.current === null) return
     if (e.pointerId !== dragPointerRef.current) return
@@ -189,23 +175,7 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
     press(midi)
   }
 
-  // ホールドモード切替時は鍵盤状態を全リセット（鳴り続け事故防止）。
-  // 初回マウントでは何もしない。
-  const isInitialMount = useRef(true)
-  useEffect(() => {
-    if (isInitialMount.current) {
-      isInitialMount.current = false
-      return
-    }
-    releaseAll()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [holdMode])
-
   // iOS Safari の SVG タッチイベント不発バグ対策。
-  // inline style の touchAction:'none' が iOS 16 以前で無視されるケースがあり、
-  // OS が touch を scroll/zoom 候補と判定してしまうと pointerdown 自体が来なくなる。
-  // native の touchstart を passive:false で登録し、preventDefault を呼ぶことで
-  // 「この領域は OS のジェスチャ対象外」と明示し、pointer events 経路を確実に開通させる。
   useEffect(() => {
     const svg = svgRef.current
     if (!svg) return
@@ -216,10 +186,35 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
     return () => svg.removeEventListener('touchstart', onTouchStart)
   }, [])
 
+  // hold / sequencer のトグル切替時、通常モードで押下中だった音を確実に止める。
+  // 設定を切り替えると release ロジックのルーティング先が変わって、
+  // 古い経路で開始されたノートが新しい経路で止まらなくなる（鳴り続け事故）。
+  // 両方の停止 API は no-op safe なので両方呼んで掃除する。
+  // ホールド演奏（store の playSustain）には触らない — そちらは store 側で管理。
+  const isInitialMount = useRef(true)
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false
+      return
+    }
+    if (heldRef.current.length > 0) {
+      heldRef.current = []
+      AudioEngine.noteOff()
+      Sequencer.setRoot(null)
+      setActiveMidi(null)
+      setCurrentFreq(null)
+    }
+  }, [keyboardHold, sequencerEnabled, setCurrentFreq])
+
   // PC キーボード
   useEffect(() => {
     const downHandler = (e: KeyboardEvent) => {
       if (e.repeat) return
+      const target = e.target as HTMLElement | null
+      if (target) {
+        const tag = target.tagName.toLowerCase()
+        if (tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable) return
+      }
       const key = e.key.toLowerCase()
       const offset = KEY_TO_MIDI_OFFSET[key]
       if (offset === undefined) return
@@ -233,6 +228,7 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
       release(pcBaseMidi + offset)
     }
     // ウィンドウがフォーカスを失ったときは押下中の鍵を全て解放する（keyup を取りこぼすため）
+    // ホールド中の音は releaseAll 内で残す
     const blurHandler = () => releaseAll()
     window.addEventListener('keydown', downHandler)
     window.addEventListener('keyup', upHandler)
@@ -241,7 +237,6 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
       window.removeEventListener('keydown', downHandler)
       window.removeEventListener('keyup', upHandler)
       window.removeEventListener('blur', blurHandler)
-      // 画面遷移時に発音を確実に停止
       releaseAll()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -258,6 +253,10 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
   const whiteX = new Map<number, number>()
   whiteKeys.forEach((m, i) => whiteX.set(m, i * whiteWidth))
 
+  // 表示中の MIDI: ホールド演奏中なら sustain の midi を優先。それ以外はローカル activeMidi。
+  const displayMidi = playSustain ? playSustain.midi : activeMidi
+  const isHoldDisplay = playSustain !== null
+
   // ホールド中の色（青系の通常 active と区別するため amber 系を使用）
   const heldWhiteColor = '#fed7aa'   // tailwind orange-200
   const heldBlackColor = '#c2410c'   // tailwind orange-700
@@ -267,11 +266,39 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
   return (
     <div className="rounded-lg border border-lab-line bg-white p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-lab-mute">
-        <span className="font-semibold">
-          ピアノ鍵盤
-          {holdMode && <span className="ml-2 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold text-orange-700">🔒 HOLD</span>}
-        </span>
-        <span>PCキーボード: <code className="rounded bg-slate-100 px-1">a w s e d f t g y h u j k o l p ;</code> (C4〜E5)</span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-semibold">ピアノ鍵盤</span>
+          {/* ホールド / シーケンサー トグル（全 step 共通の store 状態を切替） */}
+          <label
+            className={`inline-flex cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold transition ${
+              keyboardHold ? 'border-orange-300 bg-orange-50 text-orange-700' : 'border-lab-line bg-white text-lab-mute hover:bg-slate-50'
+            }`}
+            title="ON にすると押した鍵が継続発音。同じ鍵を再押下で停止。step 切替後も継続。"
+          >
+            <input
+              type="checkbox"
+              checked={keyboardHold}
+              onChange={(e) => setKeyboardHold(e.target.checked)}
+              className="accent-orange-500"
+            />
+            🔒 ホールド
+          </label>
+          <label
+            className={`inline-flex cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold transition ${
+              sequencerEnabled ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-lab-line bg-white text-lab-mute hover:bg-slate-50'
+            }`}
+            title="ON にすると押した鍵をルートとしてシーケンサーが演奏。OFF なら単音。"
+          >
+            <input
+              type="checkbox"
+              checked={sequencerEnabled}
+              onChange={(e) => setSequencerEnabled(e.target.checked)}
+              className="accent-emerald-500"
+            />
+            🎼 シーケンサー
+          </label>
+        </div>
+        <span className="hidden md:inline">PCキーボード: <code className="rounded bg-slate-100 px-1">a w s e d f t g y h u j k o l p ;</code> (C4〜E5)</span>
       </div>
       <div className="touch-none overflow-x-auto">
         <svg
@@ -288,8 +315,8 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
           {/* 白鍵 */}
           {whiteKeys.map((m) => {
             const x = whiteX.get(m)!
-            const active = activeMidi === m
-            const fill = active ? (holdMode ? heldWhiteColor : activeWhiteColor) : '#ffffff'
+            const active = displayMidi === m
+            const fill = active ? (isHoldDisplay ? heldWhiteColor : activeWhiteColor) : '#ffffff'
             return (
               <g key={`w-${m}`}>
                 <rect
@@ -323,8 +350,8 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
             const baseX = whiteX.get(prevWhite)
             if (baseX === undefined) return null
             const x = baseX + whiteWidth - blackWidth / 2
-            const active = activeMidi === m
-            const fill = active ? (holdMode ? heldBlackColor : activeBlackColor) : '#0f172a'
+            const active = displayMidi === m
+            const fill = active ? (isHoldDisplay ? heldBlackColor : activeBlackColor) : '#0f172a'
             return (
               <rect
                 key={`b-${m}`}
@@ -344,13 +371,14 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
         </svg>
       </div>
       <div className="mt-2 text-xs text-lab-mute">
-        {holdMode ? 'ホールド中' : '発音中'}:{' '}
-        {activeMidi !== null ? (
+        {isHoldDisplay ? 'ホールド中' : '発音中'}:{' '}
+        {displayMidi !== null ? (
           <>
-            <span className={`font-mono font-semibold ${holdMode ? 'text-orange-700' : 'text-lab-ink'}`}>{midiToName(activeMidi)}</span>
+            <span className={`font-mono font-semibold ${isHoldDisplay ? 'text-orange-700' : 'text-lab-ink'}`}>{midiToName(displayMidi)}</span>
             {' / '}
-            <span className="font-mono">{midiToFreq(activeMidi).toFixed(1)} Hz</span>
-            {holdMode && <span className="ml-1">🔒</span>}
+            <span className="font-mono">{midiToFreq(displayMidi).toFixed(1)} Hz</span>
+            {isHoldDisplay && <span className="ml-1">🔒</span>}
+            {playSustain?.withSequencer && <span className="ml-1 text-emerald-600">🎼</span>}
           </>
         ) : (
           <span className="font-mono text-lab-mute">None</span>

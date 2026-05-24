@@ -58,13 +58,18 @@ export function Step1Waveform() {
     AudioEngine.setFilterBypass(!applyEffects)
   }, [applyEffects])
 
-  // 画面遷移時に連続再生を停止し、バイパス設定も解除
+  // 画面遷移時に連続再生を停止し、バイパス設定も解除。
+  // ホールド演奏中（playSustain != null）は noteOff / setCurrentFreq(null) をスキップして
+  // step 跨ぎの継続再生を維持する。bypass 書き戻しは sustainOverride が吸収するため触っても安全。
   useEffect(() => {
     return () => {
-      AudioEngine.noteOff()
+      const sustaining = useSynthStore.getState().playSustain !== null
+      if (!sustaining) {
+        AudioEngine.noteOff()
+        setCurrentFreq(null)
+      }
       AudioEngine.setEnvelopeBypass(false)
       AudioEngine.setFilterBypass(false)
-      setCurrentFreq(null)
     }
   }, [setCurrentFreq])
 

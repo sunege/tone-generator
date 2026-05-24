@@ -8,6 +8,12 @@ import { AudioEngine } from '../audio/AudioEngine'
 import { Sequencer } from '../audio/sequencer'
 import { SEQUENCER_MAX_STEPS } from '../types'
 
+/**
+ * Step 7: パターン編集とライブ演奏。
+ * ホールド／シーケンサー ON/OFF は鍵盤ヘッダー側に統合済み（全 step 共通）。
+ * このページは「pattern を編集する場」+「sequencer ON で押下デモ」を提供する。
+ */
+
 // 半音オフセット → 度数名（オクターブ越えは ↑/↓ で表現）
 //
 // 音の「ピッチクラス」を root の度数名で表す。マイナス側は lower octave の度数になる。
@@ -44,8 +50,6 @@ export function Step7Sequencer() {
 
   // 再生中のハイライト用（-1 は停止中）
   const [currentStep, setCurrentStep] = useState<number>(-1)
-  // ホールドモード（鍵盤を一度押すとシーケンサーが鳴り続ける）
-  const [holdMode, setHoldMode] = useState(false)
 
   const getFrequency = useCallback(() => useSynthStore.getState().currentFreq, [])
 
@@ -54,7 +58,9 @@ export function Step7Sequencer() {
     Sequencer.setConfig(seq)
   }, [seq])
 
-  // 入退室時のバイパス制御 + Sequencer コールバック接続
+  // 入退室時のバイパス制御 + Sequencer コールバック接続。
+  // ホールド演奏中（playSustain != null）は noteOff / setCurrentFreq(null) をスキップして
+  // step 跨ぎの継続再生を維持する（bypass 書き戻しは sustainOverride が吸収するため触らない）。
   useEffect(() => {
     AudioEngine.setEnvelopeBypass(false)
     AudioEngine.setFilterBypass(false)
@@ -67,19 +73,18 @@ export function Step7Sequencer() {
     return () => {
       Sequencer.onStepChange = null
       Sequencer.onNote = null
-      Sequencer.forceStop()
-      AudioEngine.noteOff()
+      const sustaining = useSynthStore.getState().playSustain !== null
+      if (!sustaining) {
+        Sequencer.forceStop()
+        AudioEngine.noteOff()
+        setCurrentFreq(null)
+      }
       AudioEngine.setEnvelopeBypass(false)
       AudioEngine.setFilterBypass(false)
       AudioEngine.setLfoBypass(true)
       AudioEngine.setFxChainBypass(true)
-      setCurrentFreq(null)
     }
   }, [setCurrentFreq])
-
-  const handleRootChange = useCallback((midi: number | null) => {
-    Sequencer.setRoot(midi)
-  }, [])
 
   const changeStepSemitones = (i: number, delta: number) => {
     const cur = seq.steps[i]
@@ -245,32 +250,13 @@ export function Step7Sequencer() {
         </div>
       </div>
 
-      {/* 鍵盤（onRootChange で Sequencer に伝える） */}
+      {/* 鍵盤。ホールド／シーケンサー トグルは Keyboard 自身のヘッダーに統合済み。 */}
       <div>
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs text-lab-mute">
-            {holdMode ? (
-              <>
-                <strong>ホールド ON</strong>: 一度押すとシーケンサーが鳴り続けます。
-                別の鍵で root 切替、同じ鍵を再度押すと停止。
-              </>
-            ) : (
-              <>鍵盤を <strong>押している間だけ</strong> シーケンサーが動作します。押した音が度数 1（root）です。</>
-            )}
-          </p>
-          <label className="flex cursor-pointer items-center gap-2 rounded-full border border-lab-line bg-white px-3 py-1 text-xs">
-            <input
-              type="checkbox"
-              checked={holdMode}
-              onChange={(e) => setHoldMode(e.target.checked)}
-              className="accent-orange-500"
-            />
-            <span className={holdMode ? 'font-semibold text-orange-700' : 'text-lab-mute'}>
-              🔒 ホールド機能 {holdMode ? 'ON' : 'OFF'}
-            </span>
-          </label>
-        </div>
-        <Keyboard onRootChange={handleRootChange} holdMode={holdMode} />
+        <p className="mb-2 text-xs text-lab-mute">
+          鍵盤の <strong>🎼 シーケンサー</strong> を ON にすると、押した音が root（度数 1）になりこのパターンが演奏されます。
+          <strong>🔒 ホールド</strong> を併用すると、同じ鍵を再度押すまで鳴り続け、step を切り替えても演奏が継続します。
+        </p>
+        <Keyboard />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">

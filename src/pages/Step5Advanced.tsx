@@ -47,19 +47,23 @@ export function Step5Advanced() {
     AudioEngine.setPitchBend(cents)
   }
 
-  // 入室時: フィルター適用＋ LFO バイパス解除。退室時: LFO はバイパスして他ステップに漏らさない
+  // 入室時: フィルター適用＋ LFO バイパス解除。退室時: LFO はバイパスして他ステップに漏らさない。
+  // ホールド演奏中は noteOff / setCurrentFreq(null) をスキップして step 跨ぎの継続再生を維持。
   useEffect(() => {
     AudioEngine.setEnvelopeBypass(false)
     AudioEngine.setFilterBypass(false)
     AudioEngine.setLfoBypass(false)
     AudioEngine.setPitchBend(0)
     return () => {
-      AudioEngine.noteOff()
+      const sustaining = useSynthStore.getState().playSustain !== null
+      if (!sustaining) {
+        AudioEngine.noteOff()
+        setCurrentFreq(null)
+      }
       AudioEngine.setEnvelopeBypass(false)
       AudioEngine.setFilterBypass(false)
       AudioEngine.setLfoBypass(true)  // LFO は退室時バイパス（patch 設定自体は保持）
       AudioEngine.setPitchBend(0)     // ピッチベンドは退室時に必ず 0 へ
-      setCurrentFreq(null)
     }
   }, [setCurrentFreq])
 

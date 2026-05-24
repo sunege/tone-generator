@@ -36,13 +36,17 @@ export function Step3Filter() {
     AudioEngine.setFilterBypass(!applyFilter)
   }, [applyFilter])
 
-  // 画面遷移時に発音とバイパスを解除
+  // 画面遷移時に発音とバイパスを解除。
+  // ホールド演奏中は noteOff / setCurrentFreq(null) をスキップして step 跨ぎの継続再生を維持。
   useEffect(() => {
     return () => {
-      AudioEngine.noteOff()
+      const sustaining = useSynthStore.getState().playSustain !== null
+      if (!sustaining) {
+        AudioEngine.noteOff()
+        setCurrentFreq(null)
+      }
       AudioEngine.setEnvelopeBypass(false)
       AudioEngine.setFilterBypass(false)
-      setCurrentFreq(null)
     }
   }, [setCurrentFreq])
 

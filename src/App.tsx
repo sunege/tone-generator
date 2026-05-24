@@ -3,6 +3,7 @@ import { useSynthStore } from './store/synthStore'
 import { AudioEngine } from './audio/AudioEngine'
 import { Stepper } from './components/Stepper'
 import { BankBar } from './components/BankBar'
+import { PlayingBanner } from './components/PlayingBanner'
 import { Step1Waveform } from './pages/Step1Waveform'
 import { Step2Envelope } from './pages/Step2Envelope'
 import { Step3Filter } from './pages/Step3Filter'
@@ -101,6 +102,11 @@ export function App() {
         </div>
         <div className="mx-auto max-w-6xl border-t border-lab-line px-4 py-2">
           <BankBar />
+        </div>
+        {/* ホールド演奏中バナー: playSustain がアクティブな時だけ表示。
+            step を跨いでも見える位置に置くため header に常駐。 */}
+        <div className="mx-auto max-w-6xl px-4">
+          <PlayingBanner />
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-4 py-6">

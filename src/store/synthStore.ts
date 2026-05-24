@@ -4,6 +4,7 @@ import { getPreset } from '../lib/wavetablePresets'
 import { ENV_PRESETS } from '../lib/envelopePresets'
 import { AudioEngine } from '../audio/AudioEngine'
 import { DEFAULT_SEQUENCER_STATE, Sequencer } from '../audio/sequencer'
+import { midiToFreq } from '../lib/noteUtils'
 import {
   BANK_COUNT,
   defaultFx,
@@ -22,6 +23,14 @@ import {
 // 波形エディタの UI 状態。ステップ切替で WaveformEditor が unmount されても保持したいため store に置く。
 type WaveEditorMode = 'draw' | 'formula'
 
+// ホールド演奏中（同じ鍵を押すまで音が止まらないモード）の状態。
+// 全 step で共有することで step 遷移しても音が継続する。
+// AudioEngine.setSustainOverride により step ごとの bypass 設定を上書きしてフルチェーン再生にする。
+type PlaySustain = {
+  midi: number
+  withSequencer: boolean
+} | null
+
 type SynthStore = {
   patch: SynthPatch
   step: StepId
@@ -38,6 +47,12 @@ type SynthStore = {
   banks: BanksState
   activeToneBank: number | null  // 0..BANK_COUNT-1
   activeSeqBank: number | null
+  // すべての Keyboard コンポーネントで共有する「ホールド演奏」と「シーケンサー駆動」のトグル状態。
+  // 各 Keyboard ヘッダーから操作。
+  keyboardHold: boolean
+  sequencerEnabled: boolean
+  // 現在のホールド演奏（非 null なら音が鳴り続けている）。
+  playSustain: PlaySustain
   setStep: (s: StepId) => void
   setWavetable: (w: Float32Array) => void
   setEnvelope: (e: Partial<Envelope>) => void
@@ -67,6 +82,15 @@ type SynthStore = {
   resetBanksToDemo: () => void
   resetPatch: () => void
   markAudioReady: () => void
+  // ----- ホールド演奏 / シーケンサー トグル -----
+  setKeyboardHold: (v: boolean) => void
+  setSequencerEnabled: (v: boolean) => void
+  /** ホールド演奏を開始（現在の sequencerEnabled を採用）。同じ midi を渡すと停止する。 */
+  startSustain: (midi: number) => void
+  /** 演奏中の根音を別の midi に切替（withSequencer の現状は維持）。 */
+  switchSustainRoot: (midi: number) => void
+  /** ホールド演奏を停止（バナーの停止ボタン、もしくは同じ鍵タップ時）。 */
+  stopSustain: () => void
 }
 
 // 初期パッチをファクトリ化（リセット用に毎回新しいインスタンスが必要）。
@@ -100,6 +124,9 @@ export const useSynthStore = create<SynthStore>((set, get) => ({
   banks: initialBanks,
   activeToneBank: null,
   activeSeqBank: null,
+  keyboardHold: false,
+  sequencerEnabled: false,
+  playSustain: null,
 
   setStep: (s) => set({ step: s }),
 
@@ -329,4 +356,79 @@ export const useSynthStore = create<SynthStore>((set, get) => ({
   },
 
   markAudioReady: () => set({ audioReady: true }),
+
+  // ----- ホールド演奏 / シーケンサー トグル -----
+
+  setKeyboardHold: (v) => {
+    set({ keyboardHold: v })
+    // ホールド OFF にした瞬間、もし演奏中なら停止する（鳴りっぱなし事故防止）
+    if (!v) get().stopSustain()
+  },
+
+  setSequencerEnabled: (v) => {
+    const prev = get()
+    set({ sequencerEnabled: v })
+    const cur = prev.playSustain
+    if (!cur) return
+    // 演奏中にトグルした場合は再生モードを乗り換える
+    if (v && !cur.withSequencer) {
+      // 単音 → シーケンサー: noteOff してから setRoot
+      AudioEngine.noteOff()
+      Sequencer.setRoot(cur.midi)
+      set({ playSustain: { ...cur, withSequencer: true } })
+    } else if (!v && cur.withSequencer) {
+      // シーケンサー → 単音: setRoot(null) してから noteOn
+      Sequencer.setRoot(null)
+      AudioEngine.noteOn(midiToFreq(cur.midi))
+      set({ playSustain: { ...cur, withSequencer: false } })
+    }
+  },
+
+  startSustain: (midi) => {
+    const s = get()
+    const cur = s.playSustain
+    // 同じ鍵が再押下されたら停止
+    if (cur && cur.midi === midi) {
+      get().stopSustain()
+      return
+    }
+    // 別の鍵 → 切替
+    if (cur) {
+      get().switchSustainRoot(midi)
+      return
+    }
+    // 新規開始: フルチェーンを保証してから音を出す
+    AudioEngine.setSustainOverride(true)
+    const withSeq = s.sequencerEnabled
+    if (withSeq) {
+      Sequencer.setRoot(midi)
+    } else {
+      AudioEngine.noteOn(midiToFreq(midi))
+    }
+    set({ playSustain: { midi, withSequencer: withSeq }, currentFreq: midiToFreq(midi) })
+  },
+
+  switchSustainRoot: (midi) => {
+    const cur = get().playSustain
+    if (!cur) return
+    if (cur.withSequencer) {
+      Sequencer.setRoot(midi)
+    } else {
+      AudioEngine.noteOn(midiToFreq(midi))  // re-attack
+    }
+    set({ playSustain: { ...cur, midi }, currentFreq: midiToFreq(midi) })
+  },
+
+  stopSustain: () => {
+    const cur = get().playSustain
+    if (!cur) return
+    if (cur.withSequencer) {
+      Sequencer.setRoot(null)
+    } else {
+      AudioEngine.noteOff()
+    }
+    // sustain override 解除 → 各 step が要求していた bypass 値が実際に効くようになる
+    AudioEngine.setSustainOverride(false)
+    set({ playSustain: null, currentFreq: null })
+  },
 }))
