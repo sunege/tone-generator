@@ -28,6 +28,10 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
   const [activeMidi, setActiveMidi] = useState<number | null>(null)
   const setCurrentFreq = useSynthStore((s) => s.setCurrentFreq)
   const pcBaseMidi = 60 // PCキーボードの "a" を C4 に割当
+  // SVG への native touchstart リスナを attach するための ref。
+  // iOS Safari は inline style の touch-action を無視する版があるため、
+  // 直接 touchstart を passive:false で preventDefault する必要がある。
+  const svgRef = useRef<SVGSVGElement>(null)
   // ホールドモード時のみ使用。押し続けの heldRef（モノ stack）とは独立に
   // 「セッション中にホールドしている root」を保持する。
   const heldRootRef = useRef<number | null>(null)
@@ -197,6 +201,21 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [holdMode])
 
+  // iOS Safari の SVG タッチイベント不発バグ対策。
+  // inline style の touchAction:'none' が iOS 16 以前で無視されるケースがあり、
+  // OS が touch を scroll/zoom 候補と判定してしまうと pointerdown 自体が来なくなる。
+  // native の touchstart を passive:false で登録し、preventDefault を呼ぶことで
+  // 「この領域は OS のジェスチャ対象外」と明示し、pointer events 経路を確実に開通させる。
+  useEffect(() => {
+    const svg = svgRef.current
+    if (!svg) return
+    const onTouchStart = (e: TouchEvent) => {
+      e.preventDefault()
+    }
+    svg.addEventListener('touchstart', onTouchStart, { passive: false })
+    return () => svg.removeEventListener('touchstart', onTouchStart)
+  }, [])
+
   // PC キーボード
   useEffect(() => {
     const downHandler = (e: KeyboardEvent) => {
@@ -254,11 +273,13 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
         </span>
         <span>PCキーボード: <code className="rounded bg-slate-100 px-1">a w s e d f t g y h u j k o l p ;</code> (C4〜E5)</span>
       </div>
-      <div className="overflow-x-auto">
+      <div className="touch-none overflow-x-auto">
         <svg
+          ref={svgRef}
           viewBox={`0 0 ${totalWidth} ${whiteHeight}`}
           preserveAspectRatio="xMinYMid meet"
-          style={{ width: '100%', maxWidth: totalWidth, height: whiteHeight, touchAction: 'none', userSelect: 'none' }}
+          className="touch-none"
+          style={{ width: '100%', maxWidth: totalWidth, height: whiteHeight, userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}
           onPointerMove={handleSvgPointerMove}
           onPointerUp={handleSvgPointerEnd}
           onPointerCancel={handleSvgPointerEnd}
@@ -280,8 +301,9 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
                   stroke="#94a3b8"
                   strokeWidth={1}
                   data-midi={m}
+                  pointerEvents="all"
                   onPointerDown={(e) => handleKeyPointerDown(e, m)}
-                  style={{ cursor: 'pointer' }}
+                  style={{ cursor: 'pointer', touchAction: 'none' }}
                 />
                 {midiToSolfege(m) && (
                   <text x={x + whiteWidth / 2} y={whiteHeight - 22} textAnchor="middle" fontSize="11" fontWeight="600" fill="#0f172a" pointerEvents="none">
@@ -313,8 +335,9 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
                 fill={fill}
                 stroke="#0f172a"
                 data-midi={m}
+                pointerEvents="all"
                 onPointerDown={(e) => handleKeyPointerDown(e, m)}
-                style={{ cursor: 'pointer' }}
+                style={{ cursor: 'pointer', touchAction: 'none' }}
               />
             )
           })}

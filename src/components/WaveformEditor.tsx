@@ -24,6 +24,20 @@ export function WaveformEditor({ wavetable, onChange, height = 240, overlayWavet
   // 直近の wavetable のミュータブルコピー（ドラッグ中は edit する）
   const workingRef = useRef<Float32Array>(wavetable)
 
+  // iOS Safari の canvas タッチ不発バグ対策: native touchstart を passive:false で登録し
+  // preventDefault することで OS のジェスチャ捕獲を抑止する。
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const onTouchStart = (e: TouchEvent) => {
+      // 手書きモード以外（数式モードプレビュー時）はタッチを通常通り扱う
+      if (mode !== 'draw') return
+      e.preventDefault()
+    }
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false })
+    return () => canvas.removeEventListener('touchstart', onTouchStart)
+  }, [mode])
+
   // 描画
   useEffect(() => {
     const canvas = canvasRef.current
@@ -176,7 +190,8 @@ export function WaveformEditor({ wavetable, onChange, height = 240, overlayWavet
         </div>
         <canvas
           ref={canvasRef}
-          style={{ width: '100%', height, touchAction: 'none', cursor: mode === 'draw' ? 'crosshair' : 'default' }}
+          className="touch-none"
+          style={{ width: '100%', height, cursor: mode === 'draw' ? 'crosshair' : 'default', userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}

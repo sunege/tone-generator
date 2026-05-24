@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import type { Envelope } from '../types'
 
 type Props = {
@@ -15,6 +15,19 @@ const SUSTAIN_HOLD = 0.5 // 表示上のサスティン保持時間（秒）
 export function EnvelopeEditor({ envelope, onChange, height = 200 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
   const draggingRef = useRef<null | 'a' | 'd' | 's' | 'r'>(null)
+
+  // iOS Safari の SVG タッチ不発バグ対策: native touchstart を passive:false で登録し、
+  // preventDefault することで OS のジェスチャ捕獲を抑止する。これがないと
+  // inline style の touch-action:'none' が無視される iOS バージョンでハンドルが反応しない。
+  useEffect(() => {
+    const svg = svgRef.current
+    if (!svg) return
+    const onTouchStart = (e: TouchEvent) => {
+      e.preventDefault()
+    }
+    svg.addEventListener('touchstart', onTouchStart, { passive: false })
+    return () => svg.removeEventListener('touchstart', onTouchStart)
+  }, [])
 
   const totalTime = MAX_A + MAX_D + SUSTAIN_HOLD + MAX_R
   const xScale = (sec: number) => (sec / totalTime) * 1000 // 0..1000 viewBox
@@ -72,7 +85,8 @@ export function EnvelopeEditor({ envelope, onChange, height = 200 }: Props) {
         ref={svgRef}
         viewBox="0 0 1000 200"
         preserveAspectRatio="none"
-        style={{ width: '100%', height, touchAction: 'none' }}
+        className="touch-none"
+        style={{ width: '100%', height, userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerUp}
@@ -122,7 +136,7 @@ function DragHandle({
 }) {
   return (
     <g>
-      <circle cx={cx} cy={cy} r={12} fill="transparent" onPointerDown={onPointerDown} style={{ cursor: 'grab' }} />
+      <circle cx={cx} cy={cy} r={14} fill="transparent" pointerEvents="all" onPointerDown={onPointerDown} style={{ cursor: 'grab', touchAction: 'none' }} />
       <circle cx={cx} cy={cy} r={6} fill={color} stroke="white" strokeWidth={2} pointerEvents="none" />
     </g>
   )
