@@ -26,8 +26,13 @@ type WaveEditorMode = 'draw' | 'formula'
 // ホールド演奏中（同じ鍵を押すまで音が止まらないモード）の状態。
 // 全 step で共有することで step 遷移しても音が継続する。
 // AudioEngine.setSustainOverride により step ごとの bypass 設定を上書きしてフルチェーン再生にする。
+//
+// midis は現在ホールド中の MIDI 番号の集合（押された順）。
+// - mono+hold: 常に長さ 1（switch すると入れ替わる）
+// - poly+hold: 押すたびに増え、同じ鍵を再度押すとその音だけ抜ける（和音ホールド）
+// - withSequencer: シーケンサー駆動か（mono+seq+hold の 1 root のみ。poly では常に false）
 type PlaySustain = {
-  midi: number
+  midis: number[]
   withSequencer: boolean
 } | null
 
@@ -47,10 +52,12 @@ type SynthStore = {
   banks: BanksState
   activeToneBank: number | null  // 0..BANK_COUNT-1
   activeSeqBank: number | null
-  // すべての Keyboard コンポーネントで共有する「ホールド演奏」と「シーケンサー駆動」のトグル状態。
+  // すべての Keyboard コンポーネントで共有する「ホールド演奏」「シーケンサー駆動」「ポリ」のトグル状態。
   // 各 Keyboard ヘッダーから操作。
+  // ポリは hold / sequencer と相互排他: ポリ ON → 他 2 つ OFF、他のどれか ON → ポリ OFF。
   keyboardHold: boolean
   sequencerEnabled: boolean
+  polyMode: boolean
   // 現在のホールド演奏（非 null なら音が鳴り続けている）。
   playSustain: PlaySustain
   setStep: (s: StepId) => void
@@ -82,9 +89,10 @@ type SynthStore = {
   resetBanksToDemo: () => void
   resetPatch: () => void
   markAudioReady: () => void
-  // ----- ホールド演奏 / シーケンサー トグル -----
+  // ----- ホールド演奏 / シーケンサー / ポリ トグル -----
   setKeyboardHold: (v: boolean) => void
   setSequencerEnabled: (v: boolean) => void
+  setPolyMode: (v: boolean) => void
   /** ホールド演奏を開始（現在の sequencerEnabled を採用）。同じ midi を渡すと停止する。 */
   startSustain: (midi: number) => void
   /** 演奏中の根音を別の midi に切替（withSequencer の現状は維持）。 */
@@ -126,6 +134,7 @@ export const useSynthStore = create<SynthStore>((set, get) => ({
   activeSeqBank: null,
   keyboardHold: false,
   sequencerEnabled: false,
+  polyMode: false,
   playSustain: null,
 
   setStep: (s) => set({ step: s }),
@@ -362,61 +371,116 @@ export const useSynthStore = create<SynthStore>((set, get) => ({
   setKeyboardHold: (v) => {
     set({ keyboardHold: v })
     // ホールド OFF にした瞬間、もし演奏中なら停止する（鳴りっぱなし事故防止）
+    // ポリ + ホールド ON の和音ホールド中に Hold OFF にしたケースもここで全停止
     if (!v) get().stopSustain()
   },
 
   setSequencerEnabled: (v) => {
+    // ON にする時はポリと相互排他: ポリを OFF にする（シーケンサーは mono root 設計）
+    if (v && get().polyMode) {
+      AudioEngine.noteOffAll()
+      set({ polyMode: false })
+    }
     const prev = get()
     set({ sequencerEnabled: v })
     const cur = prev.playSustain
     if (!cur) return
-    // 演奏中にトグルした場合は再生モードを乗り換える
+    // 演奏中にトグルした場合は再生モードを乗り換える（mono+hold での sustain を想定）
+    // ポリホールド中はそもそも poly が ON なので、上で stopSustain 相当が走るため到達しない
+    const root = cur.midis[0]  // mono なので長さ 1
     if (v && !cur.withSequencer) {
-      // 単音 → シーケンサー: noteOff してから setRoot
       AudioEngine.noteOff()
-      Sequencer.setRoot(cur.midi)
+      Sequencer.setRoot(root)
       set({ playSustain: { ...cur, withSequencer: true } })
     } else if (!v && cur.withSequencer) {
-      // シーケンサー → 単音: setRoot(null) してから noteOn
       Sequencer.setRoot(null)
-      AudioEngine.noteOn(midiToFreq(cur.midi))
+      AudioEngine.noteOn(midiToFreq(root))
       set({ playSustain: { ...cur, withSequencer: false } })
+    }
+  },
+
+  setPolyMode: (v) => {
+    if (v) {
+      // ポリ ON は シーケンサーとのみ相互排他。ホールドは共存可。
+      // ただし mono で sustain 中なら一度クリアする（voice key の付け方が変わるため不整合回避）
+      const s = get()
+      if (s.playSustain) {
+        if (s.playSustain.withSequencer) Sequencer.setRoot(null)
+        else AudioEngine.noteOff()
+        AudioEngine.setSustainOverride(false)
+      } else if (s.sequencerEnabled) {
+        Sequencer.setRoot(null)
+      }
+      set({ polyMode: true, sequencerEnabled: false, playSustain: null, currentFreq: null })
+    } else {
+      // ポリ OFF にする時は鳴っている poly voice を全て止める
+      // ポリホールド中の和音 sustain もここで全クリア
+      AudioEngine.noteOffAll()
+      AudioEngine.setSustainOverride(false)
+      set({ polyMode: false, playSustain: null, currentFreq: null })
     }
   },
 
   startSustain: (midi) => {
     const s = get()
     const cur = s.playSustain
-    // 同じ鍵が再押下されたら停止
-    if (cur && cur.midi === midi) {
+    const poly = s.polyMode
+    const withSeq = s.sequencerEnabled
+
+    // ----- ポリ + ホールド: 和音 sustain（同じ鍵で個別停止、別の鍵で追加） -----
+    if (poly) {
+      const isHeld = cur?.midis.includes(midi) ?? false
+      if (isHeld) {
+        // 該当 voice だけ release
+        AudioEngine.noteOff(midi)
+        const next = cur!.midis.filter((m) => m !== midi)
+        if (next.length === 0) {
+          // 最後の音 → 全停止
+          AudioEngine.setSustainOverride(false)
+          set({ playSustain: null, currentFreq: null })
+        } else {
+          // currentFreq は残っている最後の追加音にロック（任意の選択）
+          set({ playSustain: { midis: next, withSequencer: false }, currentFreq: midiToFreq(next[next.length - 1]) })
+        }
+      } else {
+        // 新規追加（初回 sustain なら override ON）
+        if (!cur) AudioEngine.setSustainOverride(true)
+        AudioEngine.noteOn(midiToFreq(midi), midi)
+        const midis = cur ? [...cur.midis, midi] : [midi]
+        set({ playSustain: { midis, withSequencer: false }, currentFreq: midiToFreq(midi) })
+      }
+      return
+    }
+
+    // ----- モノ + ホールド（既存挙動）: 同 midi で停止、別 midi で root 切替 -----
+    if (cur && cur.midis[0] === midi) {
       get().stopSustain()
       return
     }
-    // 別の鍵 → 切替
     if (cur) {
       get().switchSustainRoot(midi)
       return
     }
     // 新規開始: フルチェーンを保証してから音を出す
     AudioEngine.setSustainOverride(true)
-    const withSeq = s.sequencerEnabled
     if (withSeq) {
       Sequencer.setRoot(midi)
     } else {
       AudioEngine.noteOn(midiToFreq(midi))
     }
-    set({ playSustain: { midi, withSequencer: withSeq }, currentFreq: midiToFreq(midi) })
+    set({ playSustain: { midis: [midi], withSequencer: withSeq }, currentFreq: midiToFreq(midi) })
   },
 
   switchSustainRoot: (midi) => {
     const cur = get().playSustain
     if (!cur) return
+    // mono 専用 API（poly では startSustain 側で add/remove）
     if (cur.withSequencer) {
       Sequencer.setRoot(midi)
     } else {
       AudioEngine.noteOn(midiToFreq(midi))  // re-attack
     }
-    set({ playSustain: { ...cur, midi }, currentFreq: midiToFreq(midi) })
+    set({ playSustain: { ...cur, midis: [midi] }, currentFreq: midiToFreq(midi) })
   },
 
   stopSustain: () => {
@@ -425,7 +489,8 @@ export const useSynthStore = create<SynthStore>((set, get) => ({
     if (cur.withSequencer) {
       Sequencer.setRoot(null)
     } else {
-      AudioEngine.noteOff()
+      // mono / poly どちらも noteOffAll で全 voice 止めて安全側に倒す
+      AudioEngine.noteOffAll()
     }
     // sustain override 解除 → 各 step が要求していた bypass 値が実際に効くようになる
     AudioEngine.setSustainOverride(false)

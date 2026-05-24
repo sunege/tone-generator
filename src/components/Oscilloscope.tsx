@@ -8,10 +8,15 @@ type Props = {
   color?: string
 }
 
-// 描画継続のしきい値。0.0005 ≈ -66dB FS。
-// 人間の聴覚しきい値より少し下までは描き続け、Release ランプや Delay/Reverb の反響が
-// 「音として聞こえている間は必ず見える」状態にする。
-const SILENCE_THRESHOLD = 0.0005
+// 「描画継続するか」をヒステリシスで判定するための 2 段しきい値。
+// 単一しきい値だと release tail / FX 反響中に peak がしきい値付近を上下して
+// フレームごとに描画 ON/OFF が切り替わり、見た目がちらつく問題があった。
+//   - peak ≥ ON しきい値: 「鳴っている」状態に入る／継続
+//   - peak < OFF しきい値: 「無音」状態に入る／継続
+//   - 中間値（デッドゾーン）: 直前の状態を維持する
+// これで release 末端のフラフラした peak でも状態切替が抑制され、ちらつきが消える。
+const SILENCE_THRESHOLD_ON = 0.0010   // 約 -60dB FS。ここを超えたら描画開始
+const SILENCE_THRESHOLD_OFF = 0.0003  // 約 -70dB FS。ここを下回ったら描画停止
 // 横軸は A3 (220Hz) の 1 周期で固定。約 4.55ms。
 // これで高い音ほど多くの波長が画面に収まり、波長の短さが視覚的にわかる。
 const REFERENCE_FREQ = 220
@@ -38,6 +43,8 @@ export function Oscilloscope({
   // 最後に観測した有効な再生周波数。鍵盤を離したあとや FX 反響中に
   // ページ側が currentFreq=null を渡してきても、トリガ同期のため記憶しておく。
   const lastFreqRef = useRef<number | null>(null)
+  // ヒステリシス用「現在 audible か」状態。release tail でのちらつき防止。
+  const isAudibleRef = useRef(false)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -87,13 +94,20 @@ export function Oscilloscope({
       const buf = bufRef.current
       analyser.getFloatTimeDomainData(buf)
 
-      // 振幅ピーク。これが SILENCE_THRESHOLD を下回るまでは描画継続する。
+      // 振幅ピーク → ヒステリシスで「audible 状態」を更新。
+      // 単純な単一しきい値だと release 末端で peak がしきい値前後を行き来して
+      // ちらつきの原因になるため、ON / OFF で別のしきい値を使う。
       let peak = 0
       for (let i = 0; i < N; i++) {
         const v = Math.abs(buf[i])
         if (v > peak) peak = v
       }
-      if (peak < SILENCE_THRESHOLD) {
+      if (isAudibleRef.current) {
+        if (peak < SILENCE_THRESHOLD_OFF) isAudibleRef.current = false
+      } else {
+        if (peak >= SILENCE_THRESHOLD_ON) isAudibleRef.current = true
+      }
+      if (!isAudibleRef.current) {
         if (labelRef.current) labelRef.current.textContent = label
         rafRef.current = requestAnimationFrame(draw)
         return

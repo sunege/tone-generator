@@ -1,18 +1,41 @@
 import type { Envelope, FilterEnvelope, FilterType, FxId, LfoParams, LfoTarget, LfoWaveform, SynthPatch } from '../types'
-import { triggerAttack, triggerRelease } from './envelope'
+import { triggerAttack, triggerRelease, type AttackInfo } from './envelope'
 import { resetFilterEnvelope, triggerFilterAttack, triggerFilterRelease } from './filterEnvelope'
 import { createAllEffects, FxChain, type FxNode } from './fx'
 
 const WORKLET_URL = '/worklet/wavetable-processor.js'
 const BITCRUSHER_WORKLET_URL = '/worklet/bitcrusher-processor.js'
 
+// ポリフォニックボイス数。各 voice は独立した wavetable worklet + envGain を持つ。
+// 8 は教材用途として十分（和音 + 両手 + シーケンサーの 1 ボイスを賄える）。
+const POLY_VOICES = 8
+
+// mono モードでは voice 数を 1 に絞らず、固定の key 文字列 'mono' で常に同じ voice を再利用する。
+// これにより mono/poly 切替時に audio graph を作り直す必要がない。
+const MONO_KEY = 'mono'
+
 type LfoSlot = 1 | 2
+
+// 1 ボイス分の音源（wavetable）+ ADSR。
+// 全 voice の出力は sumBus で加算され、その後段は共有（filter / LFO / FX）。
+type Voice = {
+  worklet: AudioWorkletNode
+  envGain: GainNode
+  detuneParam: AudioParam | null
+  // 状態追跡（per-voice）
+  attackInfo: AttackInfo | null
+  noteActive: boolean
+  /** どの key にアサインされているか。null = 未使用。同じ key の再 noteOn は retrigger。 */
+  key: string | number | null
+  /** LRU stealing のための最終トリガ時刻（ctx.currentTime） */
+  lastTriggerTime: number
+}
 
 type EngineState = {
   ctx: AudioContext
-  worklet: AudioWorkletNode
-  envGain: GainNode
-  lfoAmpGain: GainNode    // LFO の振幅モジュレーション用（基本値 1）
+  voices: Voice[]
+  sumBus: GainNode         // 全 voice の合算 → 後段共有チェーンへ
+  lfoAmpGain: GainNode     // LFO の振幅モジュレーション用（基本値 1）
   filter: BiquadFilterNode
   analyserPre: AnalyserNode
   analyserPost: AnalyserNode
@@ -26,7 +49,6 @@ type EngineState = {
   // フィルター ADSR の出力（filterEnvSource → filterEnvDepth → filter.frequency の additive 経路）
   filterEnvSource: ConstantSourceNode
   filterEnvDepth: GainNode
-  detuneParam: AudioParam | null
   // FX チェーン: masterGain → (chainDry | fxChain → chainWet) → analyserOut → destination
   chainDry: GainNode
   chainWet: GainNode
@@ -37,7 +59,6 @@ type EngineState = {
 
 let state: EngineState | null = null
 let currentPatch: SynthPatch | null = null
-let noteActive = false
 // 実際にエンジンに適用されている bypass 値（後述の sustainOverride による override 反映後）
 let envelopeBypass = false
 let filterBypass = false
@@ -90,7 +111,14 @@ function disconnectLfo(slot: LfoSlot) {
   try {
     if (connected === 'amp') nodes.depth.disconnect(state.lfoAmpGain.gain)
     else if (connected === 'filter') nodes.depth.disconnect(state.filter.frequency)
-    else if (connected === 'pitch' && state.detuneParam) nodes.depth.disconnect(state.detuneParam)
+    else if (connected === 'pitch') {
+      // pitch は全 voice の detune に接続しているため全切断する
+      for (const v of state.voices) {
+        if (v.detuneParam) {
+          try { nodes.depth.disconnect(v.detuneParam) } catch { /* 一致しない接続は無視 */ }
+        }
+      }
+    }
   } catch {
     /* ignore — disconnect は対象が一致しないと例外を投げるが、状態は同期している前提 */
   }
@@ -103,7 +131,13 @@ function connectLfoTo(slot: LfoSlot, target: LfoTarget) {
   if (!nodes) return
   if (target === 'amp') nodes.depth.connect(state.lfoAmpGain.gain)
   else if (target === 'filter') nodes.depth.connect(state.filter.frequency)
-  else if (target === 'pitch' && state.detuneParam) nodes.depth.connect(state.detuneParam)
+  else if (target === 'pitch') {
+    // 全 voice の detune に分岐接続。各 voice ごとに独立した worklet なので
+    // ピッチ LFO は全 voice に同じ揺らぎを与える（一般的な mono LFO の振る舞い）。
+    for (const v of state.voices) {
+      if (v.detuneParam) nodes.depth.connect(v.detuneParam)
+    }
+  }
   lfoConnectedTo[slot - 1] = target
 }
 
@@ -179,6 +213,26 @@ function applyFxChainBypassEffective() {
   state.chainWet.gain.setTargetAtTime(enabled ? 0 : 1, t, 0.02)
 }
 
+// Voice の取得ロジック:
+//   1. 同じ key を持つ voice（同 midi の再 noteOn は同じ voice で retrigger）
+//   2. 未使用 voice（noteActive=false かつ key=null）
+//   3. 全使用中なら LRU（最も古い lastTriggerTime）を steal
+function findVoice(key: string | number): Voice {
+  if (!state) throw new Error('AudioEngine not ready')
+  // 1. 同じ key を持つ voice を再利用
+  const same = state.voices.find((v) => v.key === key)
+  if (same) return same
+  // 2. 空き voice
+  const free = state.voices.find((v) => !v.noteActive)
+  if (free) return free
+  // 3. LRU steal
+  let oldest = state.voices[0]
+  for (const v of state.voices) {
+    if (v.lastTriggerTime < oldest.lastTriggerTime) oldest = v
+  }
+  return oldest
+}
+
 async function ensureContext(): Promise<EngineState> {
   if (state) return state
   const ctx = new AudioContext()
@@ -186,14 +240,33 @@ async function ensureContext(): Promise<EngineState> {
     ctx.audioWorklet.addModule(WORKLET_URL),
     ctx.audioWorklet.addModule(BITCRUSHER_WORKLET_URL),
   ])
-  const worklet = new AudioWorkletNode(ctx, 'wavetable-processor', {
-    numberOfInputs: 0,
-    numberOfOutputs: 1,
-    outputChannelCount: [1],
-  })
 
-  const envGain = ctx.createGain()
-  envGain.gain.value = 0.0001
+  // sumBus: 全 voice の出力を加算する。gain=1 で透過。
+  const sumBus = ctx.createGain()
+  sumBus.gain.value = 1
+
+  // POLY_VOICES 個の voice を作成。各 voice = worklet + envGain → sumBus
+  const voices: Voice[] = []
+  for (let i = 0; i < POLY_VOICES; i++) {
+    const worklet = new AudioWorkletNode(ctx, 'wavetable-processor', {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+    })
+    const envGain = ctx.createGain()
+    envGain.gain.value = SILENT  // 起動時はミュート（noteOn で立ち上がる）
+    worklet.connect(envGain)
+    envGain.connect(sumBus)
+    voices.push({
+      worklet,
+      envGain,
+      detuneParam: (worklet.parameters.get('detune') as AudioParam | undefined) ?? null,
+      attackInfo: null,
+      noteActive: false,
+      key: null,
+      lastTriggerTime: 0,
+    })
+  }
 
   const lfoAmpGain = ctx.createGain()
   lfoAmpGain.gain.value = 1   // LFO で加算モジュレーションする
@@ -254,10 +327,9 @@ async function ensureContext(): Promise<EngineState> {
   analyserOut.fftSize = 2048
   analyserOut.smoothingTimeConstant = 0.7
 
-  // worklet → envGain → lfoAmpGain → analyserPre → filter → analyserPost → master
+  // [8 voices] → sumBus → lfoAmpGain → analyserPre → filter → analyserPost → master
   // → (chainDry || fxChain → chainWet) → analyserOut → destination
-  worklet.connect(envGain)
-  envGain.connect(lfoAmpGain)
+  sumBus.connect(lfoAmpGain)
   lfoAmpGain.connect(analyserPre)
   analyserPre.connect(filter)
   filter.connect(analyserPost)
@@ -269,18 +341,25 @@ async function ensureContext(): Promise<EngineState> {
   chainWet.connect(analyserOut)
   analyserOut.connect(ctx.destination)
 
-  const detuneParam = (worklet.parameters.get('detune') as AudioParam | undefined) ?? null
-
   state = {
-    ctx, worklet, envGain, lfoAmpGain, filter,
+    ctx, voices, sumBus, lfoAmpGain, filter,
     analyserPre, analyserPost, masterGain,
     lfoOsc, lfoDepth,
     lfoOsc2, lfoDepth2,
     filterEnvSource, filterEnvDepth,
-    detuneParam,
     chainDry, chainWet, fxChain, fxNodes, analyserOut,
   }
   return state
+}
+
+// 全 voice の wavetable を更新（worklet ごとに別コピーを送る）
+function broadcastWavetable(buf: Float32Array) {
+  if (!state) return
+  for (const v of state.voices) {
+    const copy = new Float32Array(buf.length)
+    copy.set(buf)
+    v.worklet.port.postMessage({ type: 'wavetable', data: copy })
+  }
 }
 
 export const AudioEngine = {
@@ -310,10 +389,7 @@ export const AudioEngine = {
 
   setWavetable(buf: Float32Array) {
     if (currentPatch) currentPatch.wavetable = buf
-    if (!state) return
-    const copy = new Float32Array(buf.length)
-    copy.set(buf)
-    state.worklet.port.postMessage({ type: 'wavetable', data: copy })
+    broadcastWavetable(buf)
   },
 
   setEnvelope(env: Envelope) {
@@ -378,11 +454,14 @@ export const AudioEngine = {
     }
   },
 
-  // ピッチベンド: cents 単位で worklet の detune を直接書く。
+  // ピッチベンド: cents 単位で 全 voice の detune を直接書く。
   // LFO が pitch を target にしている場合は LFO 出力がこの base 値に加算される（natural）。
   setPitchBend(cents: number) {
-    if (!state || !state.detuneParam) return
-    state.detuneParam.setTargetAtTime(cents, state.ctx.currentTime, 0.005)
+    if (!state) return
+    const t = state.ctx.currentTime
+    for (const v of state.voices) {
+      if (v.detuneParam) v.detuneParam.setTargetAtTime(cents, t, 0.005)
+    }
   },
 
   // FX チェーン全体のバイパス（Step6 入退室時に切替）
@@ -468,50 +547,109 @@ export const AudioEngine = {
     }
   },
 
-  setFrequency(freq: number) {
+  /**
+   * 指定 voice key の周波数を更新（mono レガート用、noteOn のリトリガなし）。
+   * key を省略すると mono モードの固定 voice を対象にする。
+   */
+  setFrequency(freq: number, key: string | number = MONO_KEY) {
     if (!state) return
-    state.worklet.port.postMessage({ type: 'frequency', value: freq })
+    const voice = state.voices.find((v) => v.key === key && v.noteActive)
+    if (!voice) return
+    voice.worklet.port.postMessage({ type: 'frequency', value: freq })
   },
 
-  noteOn(freq: number) {
+  /**
+   * noteOn(freq, key?):
+   *   - key 省略 → mono モード（固定 voice 'mono' を使用）
+   *   - key 指定 → ポリ：同 key の voice があれば retrigger、なければ空き voice、なければ LRU steal
+   *
+   * フィルター ADSR は filter が共有なので、noteOn のたびに retrigger される（一般的な mono filter env）。
+   */
+  noteOn(freq: number, key: string | number = MONO_KEY) {
     if (!state || !currentPatch) return
     const t = state.ctx.currentTime
-    state.worklet.port.postMessage({ type: 'frequency', value: freq })
+    const voice = findVoice(key)
+    // 古い key の状態をクリア（steal の場合）
+    voice.key = key
+    voice.lastTriggerTime = t
+    voice.worklet.port.postMessage({ type: 'frequency', value: freq })
+
     // フィルター ADSR: 有効 & フィルターバイパスでなければトリガ（envelopeBypass とは独立）
     if (currentPatch.filterEnvelope.enabled && !filterBypass) {
       triggerFilterAttack(state.filterEnvDepth.gain, currentPatch.filterEnvelope, t + 0.001)
     }
+
     if (envelopeBypass) {
-      const g = state.envGain.gain
+      const g = voice.envGain.gain
       g.cancelScheduledValues(t)
       g.setValueAtTime(Math.max(SILENT, g.value), t)
       g.linearRampToValueAtTime(RAW_GAIN, t + RAW_RAMP)
-      noteActive = true
+      voice.noteActive = true
+      voice.attackInfo = null
       return
     }
-    if (noteActive) {
-      triggerRelease(state.envGain.gain, currentPatch.envelope, t)
+    // 既に発音中（同 key の retrigger）なら先に release してからアタックし直す
+    if (voice.noteActive) {
+      triggerRelease(voice.envGain.gain, currentPatch.envelope, t, voice.attackInfo)
     }
-    triggerAttack(state.envGain.gain, currentPatch.envelope, t + 0.001)
-    noteActive = true
+    voice.attackInfo = triggerAttack(voice.envGain.gain, currentPatch.envelope, t + 0.001)
+    voice.noteActive = true
   },
 
-  noteOff() {
+  /**
+   * noteOff(key?):
+   *   - key 省略 → mono 固定 voice を release
+   *   - key 指定 → 該当する voice だけ release（poly）
+   *
+   * フィルター ADSR は「すべての voice が release 状態になった時のみ」release を発火する。
+   */
+  noteOff(key: string | number = MONO_KEY) {
     if (!state || !currentPatch) return
-    if (!noteActive) return
     const t = state.ctx.currentTime
-    if (currentPatch.filterEnvelope.enabled && !filterBypass) {
-      triggerFilterRelease(state.filterEnvDepth.gain, currentPatch.filterEnvelope, t)
-    }
+    const voice = state.voices.find((v) => v.key === key && v.noteActive)
+    if (!voice) return
     if (envelopeBypass) {
-      const g = state.envGain.gain
+      const g = voice.envGain.gain
       g.cancelScheduledValues(t)
       g.setValueAtTime(Math.max(SILENT, g.value), t)
       g.linearRampToValueAtTime(SILENT, t + RAW_RAMP * 2)
     } else {
-      triggerRelease(state.envGain.gain, currentPatch.envelope, t)
+      triggerRelease(voice.envGain.gain, currentPatch.envelope, t, voice.attackInfo)
     }
-    noteActive = false
+    voice.noteActive = false
+    voice.attackInfo = null
+    voice.key = null
+
+    // フィルター ADSR は他の voice が鳴っていない時だけ release
+    if (currentPatch.filterEnvelope.enabled && !filterBypass) {
+      const anyActive = state.voices.some((v) => v.noteActive)
+      if (!anyActive) {
+        triggerFilterRelease(state.filterEnvDepth.gain, currentPatch.filterEnvelope, t)
+      }
+    }
+  },
+
+  /** 全 voice を強制 release（blur / unmount などの安全網） */
+  noteOffAll() {
+    if (!state || !currentPatch) return
+    const t = state.ctx.currentTime
+    for (const v of state.voices) {
+      if (!v.noteActive) continue
+      if (envelopeBypass) {
+        const g = v.envGain.gain
+        g.cancelScheduledValues(t)
+        g.setValueAtTime(Math.max(SILENT, g.value), t)
+        g.linearRampToValueAtTime(SILENT, t + RAW_RAMP * 2)
+      } else {
+        triggerRelease(v.envGain.gain, currentPatch.envelope, t, v.attackInfo)
+      }
+      v.noteActive = false
+      v.attackInfo = null
+      v.key = null
+    }
+    if (currentPatch.filterEnvelope.enabled && !filterBypass) {
+      triggerFilterRelease(state.filterEnvDepth.gain, currentPatch.filterEnvelope, t)
+    }
   },
 
   getAnalyserPre(): AnalyserNode | null {
