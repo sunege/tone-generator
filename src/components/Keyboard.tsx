@@ -51,6 +51,11 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
 
   // 「最後に押された鍵優先」のモノフォニック挙動のため、押下中の鍵を順序保持する
   const heldRef = useRef<number[]>([])
+  // タッチ／マウスのドラッグで鍵をまたいだときに「現在指の下にある鍵」を追跡。
+  // iOS Safari の setPointerCapture バグ回避のため pointer 1 つだけ追従し、
+  // SVG レベルで pointermove を拾ってグライド挙動を実装する。
+  const dragMidiRef = useRef<number | null>(null)
+  const dragPointerRef = useRef<number | null>(null)
 
   const press = (midi: number) => {
     if (holdModeRef.current) {
@@ -120,6 +125,8 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
   const releaseAll = () => {
     heldRef.current = []
     heldRootRef.current = null
+    dragMidiRef.current = null
+    dragPointerRef.current = null
     if (onRootChange) {
       onRootChange(null)
     } else {
@@ -127,6 +134,55 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
     }
     setActiveMidi(null)
     setCurrentFreq(null)
+  }
+
+  // ドラッグ中に指が別の鍵に乗ったときの遷移。
+  // press() を呼ぶと heldRef に新 midi が push されるが、前のドラッグ midi も
+  // heldRef に残ったままになるため、ここで明示的に取り除いてからレガート移行する。
+  // これによりリリース時に古いドラッグ鍵に「戻る」誤動作を防止する。
+  const dragMoveTo = (newMidi: number) => {
+    const prev = dragMidiRef.current
+    if (prev === newMidi) return
+    if (prev !== null) {
+      const idx = heldRef.current.indexOf(prev)
+      if (idx >= 0) heldRef.current.splice(idx, 1)
+    }
+    dragMidiRef.current = newMidi
+    press(newMidi)
+  }
+
+  // SVG レベルの pointermove。data-midi 属性つきの rect の上に指がきたら遷移する。
+  const handleSvgPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (dragPointerRef.current === null) return
+    if (e.pointerId !== dragPointerRef.current) return
+    const el = document.elementFromPoint(e.clientX, e.clientY)
+    if (!(el instanceof Element)) return
+    const attr = el.getAttribute('data-midi')
+    if (!attr) return
+    const newMidi = parseInt(attr, 10)
+    if (Number.isNaN(newMidi)) return
+    dragMoveTo(newMidi)
+  }
+
+  // pointerup / pointerleave / pointercancel いずれもドラッグ終了として扱う。
+  // 指が SVG 外で離されたケースは pointerleave 側で先に拾える。
+  const handleSvgPointerEnd = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (dragPointerRef.current === null) return
+    if (e.pointerId !== dragPointerRef.current) return
+    const midi = dragMidiRef.current
+    dragPointerRef.current = null
+    dragMidiRef.current = null
+    if (midi !== null) release(midi)
+  }
+
+  // 個別の鍵 rect から呼ばれる押下処理（ドラッグの起点登録）。
+  // 2 本目以降の指は無視（モノフォニック）。
+  const handleKeyPointerDown = (e: React.PointerEvent<SVGElement>, midi: number) => {
+    e.preventDefault()
+    if (dragPointerRef.current !== null) return
+    dragPointerRef.current = e.pointerId
+    dragMidiRef.current = midi
+    press(midi)
   }
 
   // ホールドモード切替時は鍵盤状態を全リセット（鳴り続け事故防止）。
@@ -203,6 +259,10 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
           viewBox={`0 0 ${totalWidth} ${whiteHeight}`}
           preserveAspectRatio="xMinYMid meet"
           style={{ width: '100%', maxWidth: totalWidth, height: whiteHeight, touchAction: 'none', userSelect: 'none' }}
+          onPointerMove={handleSvgPointerMove}
+          onPointerUp={handleSvgPointerEnd}
+          onPointerCancel={handleSvgPointerEnd}
+          onPointerLeave={handleSvgPointerEnd}
         >
           {/* 白鍵 */}
           {whiteKeys.map((m) => {
@@ -219,13 +279,8 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
                   fill={fill}
                   stroke="#94a3b8"
                   strokeWidth={1}
-                  onPointerDown={(e) => {
-                    e.preventDefault()
-                    ;(e.target as Element).setPointerCapture(e.pointerId)
-                    press(m)
-                  }}
-                  onPointerUp={() => release(m)}
-                  onPointerCancel={() => release(m)}
+                  data-midi={m}
+                  onPointerDown={(e) => handleKeyPointerDown(e, m)}
                   style={{ cursor: 'pointer' }}
                 />
                 {midiToSolfege(m) && (
@@ -257,13 +312,8 @@ export function Keyboard({ startMidi = 48, octaves = 3, onRootChange, holdMode =
                 height={blackHeight}
                 fill={fill}
                 stroke="#0f172a"
-                onPointerDown={(e) => {
-                  e.preventDefault()
-                  ;(e.target as Element).setPointerCapture(e.pointerId)
-                  press(m)
-                }}
-                onPointerUp={() => release(m)}
-                onPointerCancel={() => release(m)}
+                data-midi={m}
+                onPointerDown={(e) => handleKeyPointerDown(e, m)}
                 style={{ cursor: 'pointer' }}
               />
             )

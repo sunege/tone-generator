@@ -125,25 +125,22 @@ export function WaveformEditor({ wavetable, onChange, height = 240, overlayWavet
     onChange(new Float32Array(buf))
   }
 
+  // iOS Safari では canvas 上で setPointerCapture を呼ぶと後続イベントが失われる
+  // 既知のバグがあるため使用しない。代わりに pointerleave/cancel でドラッグを止め、
+  // 指が canvas 外に出たら描画を中断する仕様にする。
   const handlePointerDown = (e: React.PointerEvent) => {
     if (mode !== 'draw') return
     drawingRef.current = true
     lastIdxRef.current = null
-    ;(e.target as Element).setPointerCapture(e.pointerId)
     writePoint(e.clientX, e.clientY)
   }
   const handlePointerMove = (e: React.PointerEvent) => {
     if (!drawingRef.current) return
     writePoint(e.clientX, e.clientY)
   }
-  const handlePointerUp = (e: React.PointerEvent) => {
+  const handlePointerUp = () => {
     drawingRef.current = false
     lastIdxRef.current = null
-    try {
-      ;(e.target as Element).releasePointerCapture(e.pointerId)
-    } catch {
-      /* ignore */
-    }
   }
 
   const applyFormula = () => {
@@ -184,6 +181,7 @@ export function WaveformEditor({ wavetable, onChange, height = 240, overlayWavet
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
+          onPointerLeave={handlePointerUp}
         />
       </div>
 

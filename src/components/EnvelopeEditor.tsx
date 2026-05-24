@@ -29,9 +29,12 @@ export function EnvelopeEditor({ envelope, onChange, height = 200 }: Props) {
   const sY = yScale(envelope.sustain)
   const endY = yScale(0)
 
-  const handlePointerDown = (target: 'a' | 'd' | 's' | 'r') => (e: React.PointerEvent<SVGCircleElement>) => {
+  // iOS Safari では setPointerCapture を SVG 要素で呼ぶと
+  // 後続の pointermove/up が失われる既知バグがあるため使用しない。
+  // pointermove/up は親 SVG にバインドしているので、指が円から外れても
+  // SVG の中にある限りバブリングで追跡を継続できる。
+  const handlePointerDown = (target: 'a' | 'd' | 's' | 'r') => (_e: React.PointerEvent<SVGCircleElement>) => {
     draggingRef.current = target
-    ;(e.target as SVGCircleElement).setPointerCapture(e.pointerId)
   }
   const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
     const target = draggingRef.current
